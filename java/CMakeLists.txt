@@ -30,7 +30,11 @@ set(TARGET filament-jni)
 
 include_directories(${JNI_INCLUDE_DIRS})
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
+set(CXX_STANDARD "-std=c++14")
+if (WIN32)
+    set(CXX_STANDARD "/std:c++14")
+endif()
+
 set(FILAMENT_DIR ../android/filament-android)
 
 set(JNI_SOURCE_FILES
@@ -97,6 +101,8 @@ install(CODE "execute_process(COMMAND ${CMAKE_STRIP} -x ${CMAKE_INSTALL_PREFIX}/
 set(TARGET filament-java)
 
 include(UseJava)
+
+set(CMAKE_JAVA_COMPILE_FLAGS "-source" "1.8" "-target" "1.8")
 
 set(FILAMENT_JAVA_DIR ${FILAMENT_DIR}/src/main/java/)
 get_filename_component(FILAMENT_JAVA_DIR ${FILAMENT_JAVA_DIR} ABSOLUTE)

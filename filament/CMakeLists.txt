@@ -162,14 +162,20 @@ endif()
 # OS specific
 # ==================================================================================================
 # Here set the architecture specific sources
-if (ANDROID)
+if (USE_EXTERNAL_GLES3)
+    # Experimental feature; clients provide their own Context Manager.
+elseif (ANDROID)
     list(APPEND SRCS src/driver/opengl/ContextManagerEGL.cpp)
 elseif (APPLE)
     list(APPEND SRCS src/driver/opengl/ContextManagerCocoa.mm)
+elseif (WEBGL)
+    list(APPEND SRCS src/driver/opengl/ContextManagerWebGL.cpp)
 elseif (LINUX)
     list(APPEND SRCS src/driver/opengl/ContextManagerGLX.cpp)
-elseif(WIN32)
+elseif (WIN32)
     list(APPEND SRCS src/driver/opengl/ContextManagerWGL.cpp)
+else()
+    list(APPEND SRCS src/driver/opengl/ContextManagerDummy.cpp)
 endif()
 
 # ==================================================================================================
@@ -212,7 +218,6 @@ endif()
 # ==================================================================================================
 
 if (CMAKE_CROSSCOMPILING)
-    set(IMPORT_EXECUTABLES ${CMAKE_SOURCE_DIR}/${IMPORT_EXECUTABLES_DIR}/ImportExecutables-${CMAKE_BUILD_TYPE}.cmake)
     include(${IMPORT_EXECUTABLES})
 endif()
 
@@ -221,7 +226,7 @@ set(GENERATION_ROOT ${CMAKE_CURRENT_BINARY_DIR})
 file(MAKE_DIRECTORY "${GENERATION_ROOT}/generated/material/")
 
 # Target system.
-if (ANDROID)
+if (ANDROID OR WEBGL)
     set(MATC_TARGET mobile)
 else()
     set(MATC_TARGET desktop)
@@ -315,6 +320,7 @@ target_link_libraries(${TARGET} PUBLIC math)
 target_link_libraries(${TARGET} PUBLIC utils)
 target_link_libraries(${TARGET} PUBLIC filaflat)
 target_link_libraries(${TARGET} PUBLIC filabridge)
+target_link_libraries(${TARGET} PUBLIC image_headers)
 
 if (FILAMENT_SUPPORTS_VULKAN)
     target_link_libraries(${TARGET} PUBLIC bluevk vkmemalloc)
@@ -333,18 +339,23 @@ target_link_libraries(${TARGET} PRIVATE
 # ==================================================================================================
 # Compiler flags
 # ==================================================================================================
-set(OPTIMIZATION_FLAGS
+if (MSVC OR CLANG_CL)
+    set(OPTIMIZATION_FLAGS
+        /fp:fast
+    )
+elseif(WEBGL)
+    # Avoid strict-vtable-pointers here, it is broken in WebAssembly.
+    set(OPTIMIZATION_FLAGS -fvisibility=hidden -fvisibility-inlines-hidden)
+else()
+    set(OPTIMIZATION_FLAGS
         -ffast-math
         -ffp-contract=fast
-# TODO: aggressive vectorization is currently broken on Android
-#        -fslp-vectorize-aggressive
+        # TODO: aggressive vectorization is currently broken on Android
+        #        -fslp-vectorize-aggressive
         -fvisibility=hidden
         -fvisibility-inlines-hidden
-)
-
-if (NOT WIN32)
-    # This is not supported by clang for VS.
-    set(OPTIMIZATION_FLAGS ${OPTIMIZATION_FLAGS} -fstrict-vtable-pointers)
+        -fstrict-vtable-pointers
+    )
 endif()
 
 set(LINUX_LINKER_OPTIMIZATION_FLAGS
@@ -355,13 +366,24 @@ set(LINUX_COMPILER_FLAGS
         -fPIC
 )
 
-target_compile_options(${TARGET} PRIVATE
-        -Wall
+set(FILAMENT_WARNINGS
         -Wextra -Wno-unused-parameter
         -Wextra-semi -Wnewline-eof -Wdeprecated -Wundef
         -Wgnu-conditional-omitted-operand
         -Wweak-vtables -Wnon-virtual-dtor -Wclass-varargs -Wimplicit-fallthrough
         -Wover-aligned
+)
+
+# clang-cl maps -Wall to -Weverything, which clutters logs with benign -Wc++98-compat warnings
+# Use /W4 instead for clang-cl builds
+if (CLANG_CL)
+    set(FILAMENT_WARNINGS /W4 ${FILAMENT_WARNINGS})
+else()
+    set(FILAMENT_WARNINGS -Wall ${FILAMENT_WARNINGS})
+endif()
+
+target_compile_options(${TARGET} PRIVATE
+        ${FILAMENT_WARNINGS}
         $<$<CONFIG:Release>:${OPTIMIZATION_FLAGS}>
         $<$<AND:$<PLATFORM_ID:Darwin>,$<CONFIG:Release>>:${DARWIN_OPTIMIZATION_FLAGS}>
         $<$<PLATFORM_ID:Linux>:${LINUX_COMPILER_FLAGS}>
@@ -377,6 +399,7 @@ target_link_libraries(${TARGET} PRIVATE
 set(INSTALL_TYPE ARCHIVE)
 install(TARGETS ${TARGET} ${INSTALL_TYPE} DESTINATION lib/${DIST_DIR})
 install(DIRECTORY ${PUBLIC_HDR_DIR}/filament DESTINATION include)
+install(FILES "README.md" DESTINATION .)
 
 # ==================================================================================================
 # Sub-projects
