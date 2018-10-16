@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 
+#include <image/ColorTransform.h>
+#include <image/ImageOps.h>
 #include <image/ImageSampler.h>
+#include <image/KtxBundle.h>
 #include <image/LinearImage.h>
 
+#include <imageio/BlockCompression.h>
 #include <imageio/ImageDecoder.h>
 #include <imageio/ImageEncoder.h>
 
@@ -36,13 +40,20 @@ static bool g_formatSpecified = false;
 static bool g_createGallery = false;
 static string g_compression = "";
 static Filter g_filter = Filter::DEFAULT;
+static bool g_stripAlpha = false;
+static bool g_grayscale = false;
+static bool g_ktxContainer = false;
+static bool g_linearized = false;
 
 static const char* USAGE = R"TXT(
 MIPGEN generates mipmaps for an image down to the 1x1 level.
 
-Output filenames are generated using the specified printf pattern.
-For example, "mip%2d.png" would generate mip01.png, mip02.png, etc.
-Note that miplevel 0 is not generated since it is the original image.
+The <output_pattern> argument is a printf-style pattern.
+For example, "mip%2d.png" generates mip01.png, mip02.png, etc.
+Miplevel 0 is not generated since it is the original image.
+
+If the output format is a container format like KTX, then
+<output_pattern> is simply a filename.
 
 Usage:
     MIPGEN [options] <input_file> <output_pattern>
@@ -50,24 +61,41 @@ Usage:
 Options:
    --help, -h
        print this message
-   --license
+   --license, -L
        print copyright and license information
-   --gallery, -g
-       generate HTML gallery for review purposes (mipmap.html)
-   --format=[exr|hdr|rgbm|psd|png|dds], -f [exr|hdr|rgbm|psd|png|dds]
+   --linear, -l
+       assume that image pixels are already linearized
+   --page, -p
+       generate HTML page for review purposes (mipmap.html)
+   --grayscale, -g
+       create a single-channel image and do not perform gamma correction
+   --format=[exr|hdr|rgbm|psd|png|dds|ktx], -f [exr|hdr|rgbm|psd|png|dds|ktx]
        specify output file format, inferred from output pattern if omitted
    --kernel=[box|nearest|hermite|gaussian|normals|mitchell|lanczos|min], -k [filter]
-       specify filter kernel type (defaults to LANCZOS)
+       specify filter kernel type (defaults to lanczos)
+       the "normals" filter may automatically change the compression scheme
+   --strip-alpha
+       ignore the alpha component of the input image
    --compression=COMPRESSION, -c COMPRESSION
        format specific compression:
+           KTX:
+             astc_[fast|thorough]_[ldr|hdr]_WxH, where WxH is a valid block size
+             s3tc_rgb_dxt1, s3tc_rgba_dxt5
+             etc_FORMAT_METRIC_EFFORT
+               FORMAT is r11, signed_r11, rg11, signed_rg11, rgb8, srgb8, rgb8_alpha
+                         srgb8_alpha, rgba8, or srgb8_alpha8
+               METRIC is rgba, rgbx, rec709, numeric, or normalxyz
+               EFFORT is an integer between 0 and 100
            PNG: Ignored
            Radiance: Ignored
            Photoshop: 16 (default), 32
            OpenEXR: RAW, RLE, ZIPS, ZIP, PIZ (default)
            DDS: 8, 16 (default), 32
 
-Example:
+Examples:
     MIPGEN -g --kernel=hermite grassland.png mip_%03d.png
+    MIPGEN -f ktx --compression=astc_fast_ldr_4x4 grassland.png mips.ktx
+    MIPGEN -f ktx --compression=etc_rgb_rgba_40 grassland.png mips.ktx
 )TXT";
 
 static const char* HTML_PREFIX = R"HTML(<!DOCTYPE html>
@@ -106,14 +134,17 @@ static void license() {
 }
 
 static int handleArguments(int argc, char* argv[]) {
-    static constexpr const char* OPTSTR = "hlgf:c:k:";
+    static constexpr const char* OPTSTR = "hLlgpf:c:k:s";
     static const struct option OPTIONS[] = {
             { "help",                 no_argument, 0, 'h' },
-            { "license",              no_argument, 0, 'l' },
-            { "gallery",              no_argument, 0, 'g' },
+            { "license",              no_argument, 0, 'L' },
+            { "linear",               no_argument, 0, 'l' },
+            { "grayscale",            no_argument, 0, 'g' },
+            { "page",                 no_argument, 0, 'p' },
             { "format",         required_argument, 0, 'f' },
             { "compression",    required_argument, 0, 'c' },
             { "kernel",         required_argument, 0, 'k' },
+            { "strip-alpha",          no_argument, 0, 's' },
             { 0, 0, 0, 0 }  // termination of the option list
     };
 
@@ -127,20 +158,28 @@ static int handleArguments(int argc, char* argv[]) {
             case 'h':
                 printUsage(argv[0]);
                 exit(0);
-            case 'l':
+            case 'L':
                 license();
                 exit(0);
+            case 'l':
+                g_linearized = true;
+                break;
             case 'g':
+                g_grayscale = true;
+                break;
+            case 'p':
                 g_createGallery = true;
                 break;
             case 'k': {
-                bool isvalid;
                 g_filter = filterFromString(arg.c_str());
                 if (g_filter == Filter::DEFAULT) {
                     cerr << "Warning: unrecognized filter, falling back to DEFAULT." << endl;
                 }
                 break;
             }
+            case 's':
+                g_stripAlpha = true;
+                break;
             case 'f':
                 if (arg == "png") {
                     g_format = ImageEncoder::Format::PNG;
@@ -166,6 +205,10 @@ static int handleArguments(int argc, char* argv[]) {
                     g_format = ImageEncoder::Format::DDS_LINEAR;
                     g_formatSpecified = true;
                 }
+                if (arg == "ktx") {
+                    g_ktxContainer = true;
+                    g_formatSpecified = true;
+                }
                 break;
             case 'c':
                 g_compression = arg;
@@ -185,23 +228,122 @@ int main(int argc, char* argv[]) {
     }
     Path inputPath(argv[optionIndex++]);
     string outputPattern(argv[optionIndex]);
-    if (!g_formatSpecified) {
-        constexpr bool forceLinear = true;
-        g_format = ImageEncoder::chooseFormat(outputPattern, forceLinear);
+    if (Path(outputPattern).getExtension() == "ktx") {
+        g_ktxContainer = true;
+        g_formatSpecified = true;
+    } else if (!g_formatSpecified) {
+        g_format = ImageEncoder::chooseFormat(outputPattern, !g_linearized);
     }
 
     puts("Reading image...");
     ifstream inputStream(inputPath.getPath(), ios::binary);
-    LinearImage sourceImage = ImageDecoder::decode(inputStream, inputPath.getPath());
+    LinearImage sourceImage = ImageDecoder::decode(inputStream, inputPath.getPath(),
+            g_linearized ? ImageDecoder::ColorSpace::LINEAR : ImageDecoder::ColorSpace::SRGB);
     if (!sourceImage.isValid()) {
         cerr << "Unable to open image: " << inputPath.getPath() << endl;
-        exit(1);
+        return 1;
+    }
+    if (g_stripAlpha && sourceImage.getChannels() == 4) {
+        auto r = extractChannel(sourceImage, 0);
+        auto g = extractChannel(sourceImage, 1);
+        auto b = extractChannel(sourceImage, 2);
+        sourceImage = combineChannels({r, g, b});
+    }
+    if (g_grayscale) {
+        sourceImage = extractChannel(sourceImage, 0);
+    }
+
+    if (g_filter == Filter::GAUSSIAN_NORMALS) {
+        sourceImage = colorsToVectors(sourceImage);
     }
 
     puts("Generating miplevels...");
     uint32_t count = getMipmapCount(sourceImage);
     vector<LinearImage> miplevels(count);
     generateMipmaps(sourceImage, g_filter, miplevels.data(), count);
+
+    if (g_ktxContainer) {
+        puts("Writing KTX file to disk...");
+        // The libimage API does not include the original image in the mip array,
+        // which might make sense when generating individual files, but for a KTX
+        // bundle, we want to include level 0, so add 1 to the KTX level count.
+        KtxBundle container(1 + miplevels.size(), 1, false);
+        auto& info = container.info();
+        info = {
+            .endianness = KtxBundle::ENDIAN_DEFAULT,
+            .glType = KtxBundle::UNSIGNED_BYTE,
+            .glTypeSize = 3,
+            .glFormat = KtxBundle::RGB,
+            .glInternalFormat = KtxBundle::RGB,
+            .glBaseInternalFormat = KtxBundle::RGB,
+            .pixelWidth = sourceImage.getWidth(),
+            .pixelHeight = sourceImage.getHeight(),
+            .pixelDepth = 0,
+        };
+        if (g_grayscale) {
+            info.glTypeSize = 1;
+            info.glFormat =
+            info.glInternalFormat =
+            info.glBaseInternalFormat = KtxBundle::LUMINANCE;
+        }
+        CompressionConfig config {};
+        if (!g_compression.empty()) {
+            bool valid = parseOptionString(g_compression, &config);
+            if (!valid) {
+                cerr << "Unrecognized compression: " << g_compression << endl;
+                return 1;
+            }
+            // The KTX spec says the following for compressed textures: glTypeSize should 1,
+            // glFormat should be 0, and glBaseInternalFormat should be RED, RG, RGB, or RGBA.
+            // The glInternalFormat field is the only field that specifies the actual format.
+            info.glTypeSize = 1;
+            info.glFormat = 0;
+            info.glBaseInternalFormat = KtxBundle::RGBA;
+        }
+        uint32_t mip = 0;
+        auto addLevel = [&](LinearImage image) {
+            if (g_filter == Filter::GAUSSIAN_NORMALS) {
+                image = vectorsToColors(image);
+            }
+            std::unique_ptr<uint8_t[]> data;
+            if (config.type != CompressionConfig::INVALID) {
+                // Some encoders call exit(1) upon failure, so it's very useful to print some
+                // source image information here for when this is invoked from a build script.
+                // Note that some encoders also have limitations in terms of image size.
+                printf("Starting compression for %s (%dx%d)\n", inputPath.getName().c_str(),
+                        image.getWidth(), image.getHeight());
+                CompressedTexture tex = compressTexture(config, image);
+                // Add newline here because the ASTC encoder has a progress indicator that issues a
+                // carriage return without a line feed.
+                putc('\n', stdout);
+                container.setBlob({mip++}, tex.data.get(), tex.size);
+                info.glInternalFormat = (uint32_t) tex.format;
+                return;
+            }
+            if (g_grayscale && g_linearized) {
+                data = fromLinearToGrayscale<uint8_t>(image);
+            } else if (g_grayscale) {
+                data = fromLinearTosRGB<uint8_t, 1>(image);
+            } else if (g_linearized) {
+                data = fromLinearToRGB<uint8_t>(image);
+            } else {
+                data = fromLinearTosRGB<uint8_t>(image);
+            }
+            container.setBlob({mip++, 0, 0}, data.get(),
+                    image.getWidth() * image.getHeight() * container.info().glTypeSize);
+        };
+        addLevel(sourceImage);
+        for (auto image : miplevels) {
+            addLevel(image);
+        }
+        vector<uint8_t> fileContents(container.getSerializedLength());
+        container.serialize(fileContents.data(), fileContents.size());
+        ofstream outputStream(outputPattern, ios::out | ios::binary);
+        outputStream.write((const char*) fileContents.data(), fileContents.size());
+        outputStream.close();
+        puts("Done.");
+        return 0;
+    }
 
     puts("Writing image files to disk...");
     char path[256];
@@ -210,16 +352,20 @@ int main(int argc, char* argv[]) {
         int result = snprintf(path, sizeof(path), outputPattern.c_str(), mip++);
         if (result < 0 || result >= sizeof(path)) {
             cerr << "Output pattern is too long." << endl;
-            exit(1);
+            return 1;
         }
         ofstream outputStream(path, ios::binary | ios::trunc);
         if (!outputStream) {
             cerr << "The output file cannot be opened: " << path << endl;
         } else {
-            ImageEncoder::encode(outputStream, g_format, image, g_compression, path);
+            if (!ImageEncoder::encode(outputStream, g_format, image, g_compression, path)) {
+                cerr << "An error occurred while encoding the image." << endl;
+                return 1;
+            }
             outputStream.close();
             if (!outputStream) {
                 cerr << "An error occurred while writing the output file: " << path << endl;
+                return 1;
             }
         }
     }
@@ -236,7 +382,7 @@ int main(int argc, char* argv[]) {
         int result = snprintf(tag, sizeof(tag), pattern, inputPath.c_str(), width, height);
         if (result < 0 || result >= sizeof(tag)) {
             cerr << "Output pattern is too long." << endl;
-            exit(1);
+            return 1;
         }
         html << tag << std::endl;
         for (auto image: miplevels) {
@@ -244,7 +390,7 @@ int main(int argc, char* argv[]) {
             result = snprintf(tag, sizeof(tag), pattern, path, width, height);
             if (result < 0 || result >= sizeof(tag)) {
                 cerr << "Output pattern is too long." << endl;
-                exit(1);
+                return 1;
             }
             html << tag << std::endl;
         }

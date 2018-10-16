@@ -147,13 +147,6 @@ public:
         alignas(16) math::float4 iblSH[9]; // actually float3 entries (std140 requires float4 alignment)
     };
 
-    struct PerRenderableUib {
-        static UniformInterfaceBlock getUib() noexcept;
-        // these fields are only used to call offsetof() and make it easy to visualize the UBO
-        math::mat4f worldFromModelMatrix;
-        math::mat3f worldFromModelNormalMatrix;
-    };
-
     struct PostProcessingUib {
         static UniformInterfaceBlock getUib() noexcept;
         math::float2 uvScale;
@@ -180,7 +173,7 @@ public:
 
 public:
     static FEngine* create(Backend backend = Backend::DEFAULT,
-            ExternalContext* externalContext = nullptr, void* sharedGLContext = nullptr);
+            Platform* platform = nullptr, void* sharedGLContext = nullptr);
 
     ~FEngine() noexcept;
 
@@ -191,7 +184,6 @@ public:
 
     // Uniforms...
     const UniformInterfaceBlock& getPerViewUib() const noexcept { return mPerViewUib; }
-    const UniformInterfaceBlock& getPerRenderableUib() const noexcept { return mPerRenderableUib; }
     const UniformInterfaceBlock& getPerPostProcessUib() const noexcept { return mPostProcessUib; }
 
     // Samplers...
@@ -207,7 +199,7 @@ public:
     uint32_t getMaterialId() const noexcept { return mMaterialId++; }
 
     const FMaterial* getDefaultMaterial() const noexcept { return mDefaultMaterial; }
-    const FMaterial* getSkyboxMaterial(driver::TextureFormat format) const noexcept;
+    const FMaterial* getSkyboxMaterial(bool rgbm) const noexcept;
     const FIndirectLight* getDefaultIndirectLight() const noexcept { return mDefaultIbl; }
 
     Handle <HwProgram> getPostProcessProgramSlow(PostProcessStage stage) const noexcept;
@@ -346,7 +338,7 @@ public:
     bool execute();
 
 private:
-    FEngine(Backend backend, ExternalContext* externalContext, void* sharedGLContext);
+    FEngine(Backend backend, Platform* platform, void* sharedGLContext);
     void init();
 
     int loop();
@@ -361,10 +353,10 @@ private:
     Handle<HwProgram> createPostProcessProgram(filaflat::MaterialParser& parser,
             driver::ShaderModel model, PostProcessStage stage) const noexcept;
 
-    std::unique_ptr<Driver> mDriver;
+    Driver* mDriver = nullptr;
 
     Backend mBackend;
-    ExternalContext* mExternalContext = nullptr;
+    Platform* mPlatform = nullptr;
     void* mSharedGLContext = nullptr;
     bool mTerminated = false;
     Handle<HwRenderPrimitive> mFullScreenTriangleRph;
@@ -402,9 +394,6 @@ private:
 
     // Per-view Uniform interface block
     UniformInterfaceBlock mPerViewUib;
-
-    // Per-Renderable Uniform interface block
-    UniformInterfaceBlock mPerRenderableUib;
 
     // Per-view Sampler interface block
     SamplerInterfaceBlock mPerViewSib;

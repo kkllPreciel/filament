@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+#include "filamesh.h"
+#include "filaweb.h"
+
 #include <filament/Engine.h>
 #include <filament/IndexBuffer.h>
 #include <filament/LightManager.h>
@@ -25,13 +28,10 @@
 #include <filament/VertexBuffer.h>
 #include <filament/View.h>
 
-#include <math/vec3.h>
-
 #include <utils/Entity.h>
 #include <utils/EntityManager.h>
 
-#include "filamesh.h"
-#include "filaweb.h"
+#include <math/vec3.h>
 
 using namespace filament;
 using namespace math;
@@ -57,32 +57,85 @@ static constexpr uint8_t MATERIAL_LIT_PACKAGE[] = {
 
 static SuzanneApp app;
 
-static Texture* setTextureParameter(Engine& engine, filaweb::Asset& asset, string name,
-        TextureSampler const &sampler, Format internalFormat) {
+static Texture* setTextureParameter(Engine& engine, filaweb::Asset& asset, string name, bool linear,
+        TextureSampler const &sampler) {
+    const auto& info = asset.texture->getInfo();
+    const uint32_t nmips = asset.texture->getNumMipLevels();
 
-    const auto destructor = [](void* buffer, size_t size, void* user) {
-        auto asset = (filaweb::Asset*) user;
-        asset->data.reset();
+    // This little structure tracks how many miplevels have been uploaded to the GPU so that we can
+    // free the CPU memory at the right time.
+    struct Uploader {
+        filaweb::Asset* asset;
+        uint32_t refcount;
     };
 
-    Texture::PixelBufferDescriptor pb(
-            asset.data.get(), asset.nbytes, Texture::Format::RGBA, Texture::Type::UBYTE,
-            destructor, &asset);
+    Uploader* uploader = new Uploader {&asset, nmips};
 
-    // TODO: Since we use a Canvas 2D to decode textures, they are always 4-component. We should
-    // manually reshape the data here to improve footprint.
-    if (internalFormat == Format::R8) {
-        internalFormat = Format::RGBA8;
+    const auto destroy = [](void* buffer, size_t size, void* user) {
+        auto uploader = (Uploader*) user;
+        if (--uploader->refcount == 0) {
+            uploader->asset->texture.reset();
+            delete uploader;
+        }
+    };
+
+    uint8_t* data;
+    uint32_t nbytes;
+
+    // Compressed textures in KTX always have a glFormat of 0.
+    if (info.glFormat == 0) {
+        assert(info.pixelWidth == info.pixelHeight);
+        driver::CompressedPixelDataType datatype = filaweb::toPixelDataType(info.glInternalFormat);
+        driver::TextureFormat texformat = filaweb::toTextureFormat(info.glInternalFormat);
+
+        auto texture = Texture::Builder()
+                .width(info.pixelWidth)
+                .height(info.pixelHeight)
+                .levels(nmips)
+                .sampler(Texture::Sampler::SAMPLER_2D)
+                .format(texformat)
+                .build(engine);
+
+        for (uint32_t level = 0; level < nmips; ++level) {
+            asset.texture->getBlob({level}, &data, &nbytes);
+            Texture::PixelBufferDescriptor pb(data, nbytes, datatype, nbytes, destroy, uploader);
+            texture->setImage(engine, level, std::move(pb));
+        }
+        app.mi->setParameter(name.c_str(), texture, sampler);
+        return texture;
+    }
+
+    Texture::Format format;
+    switch (info.glTypeSize) {
+        case 1: format = Texture::Format::R; break;
+        case 2: format = Texture::Format::RG; break;
+        case 3: format = Texture::Format::RGB; break;
+        case 4: format = Texture::Format::RGBA; break;
+    }
+
+    Format internalFormat;
+    switch (info.glTypeSize) {
+        case 1: internalFormat = Format::R8; break;
+        case 2: internalFormat = Format::RG8; break;
+        case 3: internalFormat = linear ? Format::RGB8 : Format::SRGB8; break;
+        case 4: internalFormat = linear ? Format::RGBA8 : Format::SRGB8_A8; break;
     }
 
     auto texture = Texture::Builder()
-            .width(asset.width)
-            .height(asset.height)
+            .width(info.pixelWidth)
+            .height(info.pixelHeight)
+            .levels(nmips)
             .sampler(Texture::Sampler::SAMPLER_2D)
             .format(internalFormat)
             .build(engine);
 
-    texture->setImage(engine, 0, std::move(pb));
+    for (uint32_t level = 0; level < nmips; ++level) {
+        asset.texture->getBlob({level}, &data, &nbytes);
+        Texture::PixelBufferDescriptor pb(data, nbytes, format, Texture::Type::UBYTE,
+                destroy, uploader);
+        texture->setImage(engine, level, std::move(pb));
+    }
+
     app.mi->setParameter(name.c_str(), texture, sampler);
     return texture;
 }
@@ -106,26 +159,26 @@ void setup(Engine* engine, View* view, Scene* scene) {
     static auto ao = filaweb::getTexture("ao");
 
     // Create mesh.
-    printf("%s: %d bytes\n", "mesh", mesh.nbytes);
-    const uint8_t* mdata = mesh.data.get();
+    printf("%s: %d bytes\n", "mesh", mesh.rawSize);
+    const uint8_t* mdata = mesh.rawData.get();
     const auto destructor = [](void* buffer, size_t size, void* user) {
         auto asset = (filaweb::Asset*) user;
-        asset->data.reset();
+        asset->rawData.reset();
     };
     app.filamesh = decodeMesh(*engine, mdata, 0, app.mi, destructor, &mesh);
     scene->addEntity(app.filamesh->renderable);
 
     // Create textures.
-    TextureSampler sampler(MagFilter::LINEAR, WrapMode::CLAMP_TO_EDGE);
-    auto setTexture = [engine, sampler] (filaweb::Asset& asset, const char* name, Format format) {
-        printf("%s: %d x %d\n", name, asset.width, asset.height);
-        setTextureParameter(*engine, asset, name, sampler, format);
+    TextureSampler sampler(TextureSampler::MinFilter::LINEAR_MIPMAP_LINEAR, MagFilter::LINEAR,
+            WrapMode::REPEAT);
+    auto setTexture = [engine, sampler] (filaweb::Asset& asset, const char* name, bool linear) {
+        setTextureParameter(*engine, asset, name, linear, sampler);
     };
-    setTexture(albedo, "albedo", Format::SRGB8_A8);
-    setTexture(metallic, "metallic", Format::R8);
-    setTexture(roughness, "roughness", Format::R8);
-    setTexture(normal, "normal", Format::RGBA8);
-    setTexture(ao, "ao", Format::R8);
+    setTexture(albedo, "albedo", false);
+    setTexture(metallic, "metallic", false);
+    setTexture(roughness, "roughness", false);
+    setTexture(normal, "normal", true);
+    setTexture(ao, "ao", false);
 
     // Create the sun.
     auto& em = EntityManager::get();
@@ -174,6 +227,7 @@ void setup(Engine* engine, View* view, Scene* scene) {
     auto skylight = filaweb::getSkyLight(*engine, "syferfontein_18d_clear_2k");
     scene->setIndirectLight(skylight.indirectLight);
     scene->setSkybox(skylight.skybox);
+    skylight.indirectLight->setIntensity(100000);
 
     app.cam = engine->createCamera();
     app.cam->setExposure(16.0f, 1 / 125.0f, 100.0f);

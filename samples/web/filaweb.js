@@ -4,6 +4,32 @@ let context_ready = false;
 let previous_mouse_buttons = 0;
 let queued_mouse_events = [];
 
+let use_astc = false;
+let use_s3tc = false;
+let use_etc = false;
+
+let canvas = document.getElementById('filament-canvas');
+let ctx = GL.createContext(canvas, {
+    majorVersion: 2,
+    minorVersion: 0,
+    antialias: false,
+    depth: false,
+    alpha: false
+});
+GL.makeContextCurrent(ctx);
+for (let ext of Module.ctx.getSupportedExtensions()) {
+    if (ext == "WEBGL_compressed_texture_s3tc") {
+        Module.ctx.getExtension('WEBGL_compressed_texture_s3tc');
+        use_s3tc = true;
+    } else if (ext == "WEBGL_compressed_texture_astc") {
+        Module.ctx.getExtension('WEBGL_compressed_texture_astc');
+        use_astc = true;
+    } else if (ext == "WEBGL_compressed_texture_etc") {
+        Module.ctx.getExtension('WEBGL_compressed_texture_etc');
+        use_etc = true;
+    }
+}
+
 // This is usually (not always) called before the wasm has finished JIT compiling.
 async function load(promises) {
     for (let name in promises) {
@@ -13,18 +39,8 @@ async function load(promises) {
     maybe_launch();
 }
 
-// This is called as soon as the wasm has finished JIT compilation. We also create the WebGL 2.0
-// context here.
+// This is called as soon as the wasm has finished JIT compilation.
 Module.postRun = function() {
-    let canvas = document.getElementById('filament-canvas');
-    let ctx = GL.createContext(canvas, {
-        majorVersion: 2,
-        minorVersion: 0,
-        antialias: false,
-        depth: false,
-        alpha: false
-    });
-    GL.makeContextCurrent(ctx);
     context_ready = true;
     maybe_launch();
 }
@@ -36,17 +52,21 @@ function maybe_launch() {
         _launch();
         canvas_resize();
         window.addEventListener("resize", canvas_resize);
-        window.addEventListener("wheel", canvas_mouse);
-        window.addEventListener("mousemove", canvas_mouse);
-        window.addEventListener("mousedown", canvas_mouse);
-        window.addEventListener("mouseup", canvas_mouse);
+        let canvas = document.getElementById('filament-canvas');
+        canvas.addEventListener("wheel", canvas_mouse);
+        canvas.addEventListener("pointermove", canvas_mouse);
+        canvas.addEventListener("pointerdown", canvas_mouse);
+        canvas.addEventListener("pointerup", canvas_mouse);
         canvas_render();
     }
 }
 
-// Update a tiny queue of mouse events. We don't send them to WASM immediately because ImGui detects
-// click events by looking for three consecutive frames of down-up-down.
+// Update a tiny queue of pointer events. We don't send them to WASM immediately because ImGui
+// detects click events by looking for three consecutive frames of down-up-down.
 function canvas_mouse(evt) {
+    if (evt.pointerType == 'touch' && !evt.isPrimary) {
+        return;
+    }
     let args = [evt.clientX, evt.clientY, evt.deltaX || 0, evt.deltaY || 0, evt.buttons];
     if (evt.buttons != previous_mouse_buttons || queued_mouse_events.length == 0) {
         queued_mouse_events.push(args);
@@ -82,7 +102,7 @@ function load_rawfile(url) {
         fetch(url).then(resp => {
             resp.arrayBuffer().then(filedata => success({
                 kind: 'rawfile',
-                name: url,
+                url: url,
                 data: new Uint8Array(filedata)
             }));
         });
@@ -90,33 +110,28 @@ function load_rawfile(url) {
     return promise;
 }
 
-// The C++ layer uses STB to decode the PNG contents into RGBA data.
 let load_texture = load_rawfile;
 
-function load_cubemap(urlprefix, nmips) {
+function load_cubemap(name, suffix) {
+    let compressed_suffix = suffix;
+    if (use_etc) {
+        compressed_suffix = '_etc' + suffix;
+    } else if (use_s3tc) {
+        compressed_suffix = '_s3tc' + suffix;
+    }
+    let urlprefix = name + '/';
     let promises = {};
-    let name = '';
-    promises['sh.txt'] = load_rawfile(urlprefix + 'sh.txt');
-    for (let i = 0; i < nmips; i++) {
-        for (let face of 'px nx py ny pz nz'.split(' ')) {
-            name = 'm' + i + '_' + face + '.rgbm';
-            promises[name] = load_texture(urlprefix + name);
-        }
-    }
-    for (let face of 'px nx py ny pz nz'.split(' ')) {
-        name = face + '.rgbm';
-        promises[name] = load_texture(urlprefix + name);
-    }
+    promises['ibl'] = load_rawfile(urlprefix + name + '_ibl' + compressed_suffix);
+    promises['skybox'] = load_rawfile(urlprefix + name + '_skybox' + suffix);
     let numberRemaining = Object.keys(promises).length;
     var promise = new Promise((success) => {
-        for (let name in promises) {
-            promises[name].then((result) => {
-                assets[urlprefix + name] = result;
+        for (let key in promises) {
+            promises[key].then((result) => {
+                assets[urlprefix + key] = result;
                 if (--numberRemaining == 0) {
                     success({
                         kind: 'cubemap',
                         name: urlprefix,
-                        nmips: nmips,
                     });
                 }
             });

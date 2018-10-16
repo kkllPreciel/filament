@@ -30,14 +30,6 @@ import java.nio.ByteBuffer
 
 import kotlin.math.log2
 
-private fun peekSize(assets: AssetManager, name: String): Pair<Int, Int> {
-    val input = assets.open(name)
-    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeStream(input, null, opts)
-    input.close()
-    return opts.outWidth to opts.outHeight
-}
-
 data class Ibl(val indirectLight: IndirectLight,
                val indirectLightTexture: Texture,
                val skybox: Skybox,
@@ -56,6 +48,14 @@ fun destroyIbl(engine: Engine, ibl: Ibl) {
     engine.destroyTexture(ibl.indirectLightTexture)
 }
 
+private fun peekSize(assets: AssetManager, name: String): Pair<Int, Int> {
+    assets.open(name).use { input ->
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeStream(input, null, opts)
+        return opts.outWidth to opts.outHeight
+    }
+}
+
 private fun loadIndirectLight(
         assets: AssetManager,
         name: String,
@@ -65,11 +65,12 @@ private fun loadIndirectLight(
             .width(w)
             .height(h)
             .levels(log2(w.toFloat()).toInt() + 1)
-            .format(Texture.InternalFormat.RGBM)
+            .format(Texture.InternalFormat.RGBA8)
+            .rgbm(true)
             .sampler(Texture.Sampler.SAMPLER_CUBEMAP)
             .build(engine)
 
-    (0 until texture.levels).forEach {
+    repeat(texture.levels) {
         loadCubemap(texture, assets, name, engine, "m${it}_", it)
     }
 
@@ -87,7 +88,7 @@ private fun loadSphericalHarmonics(assets: AssetManager, name: String): FloatArr
     // 3 bands = 9 RGB coefficients, so 9 * 3 floats
     val sphericalHarmonics = FloatArray(9 * 3)
     BufferedReader(InputStreamReader(assets.open("$name/sh.txt"))).use { input ->
-        (0 until 9).forEach { i ->
+        repeat(9) { i ->
             val line = input.readLine()
             re.find(line)?.let {
                 sphericalHarmonics[i * 3] = it.groups[1]?.value?.toFloat() ?: 0.0f
@@ -105,7 +106,8 @@ private fun loadSkybox(assets: AssetManager, name: String, engine: Engine): Pair
             .width(w)
             .height(h)
             .levels(1)
-            .format(Texture.InternalFormat.RGBM)
+            .format(Texture.InternalFormat.RGBA8)
+            .rgbm(true)
             .sampler(Texture.Sampler.SAMPLER_CUBEMAP)
             .build(engine)
 
@@ -131,7 +133,7 @@ private fun loadCubemap(texture: Texture,
     // Allocate enough memory for all the cubemap faces
     val storage = ByteBuffer.allocateDirect(faceSize * 6)
 
-    arrayOf("px", "nx", "py", "ny", "pz", "nz").forEachIndexed { i, suffix ->
+    arrayOf("px", "nx", "py", "ny", "pz", "nz").forEach { suffix ->
         assets.open("$name/$prefix$suffix.rgbm").use {
             val bitmap = BitmapFactory.decodeStream(it, null, opts)
             bitmap?.copyPixelsToBuffer(storage)

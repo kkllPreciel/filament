@@ -208,6 +208,9 @@ DECL_DRIVER_API_2(beginFrame,
         uint64_t, monotonic_clock_ns,
         uint32_t, frameId)
 
+DECL_DRIVER_API_1(setPresentationTime,
+        uint64_t, monotonic_clock_ns)
+
 DECL_DRIVER_API_1(endFrame,
         uint32_t, frameId)
 
@@ -356,7 +359,7 @@ DECL_DRIVER_API_1(generateMipmaps,
 
 DECL_DRIVER_API_2(updateUniformBuffer,
         Driver::UniformBufferHandle, ubh,
-        UniformBuffer&&, uniformBuffer)
+        Driver::BufferDescriptor&&, buffer)
 
 DECL_DRIVER_API_2(updateSamplerBuffer,
         Driver::SamplerBufferHandle, ubh,
@@ -406,8 +409,9 @@ DECL_DRIVER_API_4(setViewportScissor,
  * Swap chain
  */
 
-DECL_DRIVER_API_1(makeCurrent,
-        Driver::SwapChainHandle, sch)
+DECL_DRIVER_API_2(makeCurrent,
+        Driver::SwapChainHandle, schDraw,
+        Driver::SwapChainHandle, schRead)
 
 
 DECL_DRIVER_API_1(commit,
@@ -424,9 +428,15 @@ DECL_DRIVER_API_4(viewport,
         size_t, width,
         size_t, height)
 
-DECL_DRIVER_API_2(bindUniforms,
+DECL_DRIVER_API_2(bindUniformBuffer,
         size_t, index,
         Driver::UniformBufferHandle, ubh)
+
+DECL_DRIVER_API_4(bindUniformBufferRange,
+        size_t, index,
+        Driver::UniformBufferHandle, ubh,
+        size_t, offset,
+        size_t, size)
 
 DECL_DRIVER_API_2(bindSamplers,
         size_t, index,

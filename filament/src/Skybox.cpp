@@ -95,7 +95,7 @@ FSkybox::FSkybox(FEngine& engine, const Builder& builder) noexcept
         : mSkyboxTexture(upcast(builder->mEnvironmentMap)),
           mRenderableManager(engine.getRenderableManager()) {
 
-    FMaterial const* material = engine.getSkyboxMaterial(mSkyboxTexture->getFormat());
+    FMaterial const* material = engine.getSkyboxMaterial(mSkyboxTexture->isRgbm());
     mSkyboxMaterialInstance = material->createInstance();
 
     TextureSampler sampler(TextureSampler::MagFilter::LINEAR, TextureSampler::WrapMode::REPEAT);
@@ -116,8 +116,8 @@ FSkybox::FSkybox(FEngine& engine, const Builder& builder) noexcept
             .build(engine, mSkybox);
 }
 
-FMaterial const* FSkybox::createMaterial(FEngine& engine, driver::TextureFormat format) {
-   if (format == driver::TextureFormat::RGBM) {
+FMaterial const* FSkybox::createMaterial(FEngine& engine, bool rgbm) {
+   if (rgbm) {
        FMaterial const* material = upcast(Material::Builder().package(
                (void*)SKYBOXRGBM_MATERIAL_PACKAGE,
                sizeof(SKYBOXRGBM_MATERIAL_PACKAGE)).build(engine));

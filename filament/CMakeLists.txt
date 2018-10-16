@@ -9,7 +9,7 @@ set(PUBLIC_HDR_DIR include)
 # ==================================================================================================
 set(PUBLIC_HDRS
         include/filament/driver/BufferDescriptor.h
-        include/filament/driver/ExternalContext.h
+        include/filament/driver/Platform.h
         include/filament/driver/PixelBufferDescriptor.h
         include/filament/Box.h
         include/filament/Camera.h
@@ -53,12 +53,11 @@ set(SRCS
         src/driver/CircularBuffer.cpp
         src/driver/Driver.cpp
         src/driver/DriverAPI.inc
-        src/driver/ExternalContext.cpp
+        src/driver/Platform.cpp
         src/driver/GPUBuffer.cpp
         src/driver/Handle.cpp
         src/driver/Program.cpp
         src/driver/SamplerBuffer.cpp
-        src/driver/UniformBuffer.cpp
         src/Box.cpp
         src/Camera.cpp
         src/Color.cpp
@@ -90,6 +89,7 @@ set(SRCS
         src/SwapChain.cpp
         src/Stream.cpp
         src/Texture.cpp
+        src/UniformBuffer.cpp
         src/View.cpp
         src/Viewport.cpp
 )
@@ -136,7 +136,6 @@ set(PRIVATE_HDRS
         src/driver/Handle.h
         src/driver/Program.h
         src/driver/SamplerBuffer.h
-        src/driver/UniformBuffer.h
         src/FilamentAPI-impl.h
         src/FrameInfo.h
         src/Intersections.h
@@ -144,6 +143,7 @@ set(PRIVATE_HDRS
         src/PrecompiledMaterials.h
         src/RenderPass.h
         src/RenderTargetPool.h
+        src/UniformBuffer.h
         src/upcast.h)
 
 set(MATERIAL_SRCS
@@ -165,17 +165,20 @@ endif()
 if (USE_EXTERNAL_GLES3)
     # Experimental feature; clients provide their own Context Manager.
 elseif (ANDROID)
-    list(APPEND SRCS src/driver/opengl/ContextManagerEGL.cpp)
+    list(APPEND SRCS src/driver/android/ExternalStreamManagerAndroid.cpp)
+    list(APPEND SRCS src/driver/android/ExternalTextureManagerAndroid.cpp)
+    list(APPEND SRCS src/driver/android/VirtualMachineEnv.cpp)
+    list(APPEND SRCS src/driver/opengl/PlatformEGL.cpp)
 elseif (APPLE)
-    list(APPEND SRCS src/driver/opengl/ContextManagerCocoa.mm)
+    list(APPEND SRCS src/driver/opengl/PlatformCocoaGL.mm)
 elseif (WEBGL)
-    list(APPEND SRCS src/driver/opengl/ContextManagerWebGL.cpp)
+    list(APPEND SRCS src/driver/opengl/PlatformWebGL.cpp)
 elseif (LINUX)
-    list(APPEND SRCS src/driver/opengl/ContextManagerGLX.cpp)
+    list(APPEND SRCS src/driver/opengl/PlatformGLX.cpp)
 elseif (WIN32)
-    list(APPEND SRCS src/driver/opengl/ContextManagerWGL.cpp)
+    list(APPEND SRCS src/driver/opengl/PlatformWGL.cpp)
 else()
-    list(APPEND SRCS src/driver/opengl/ContextManagerDummy.cpp)
+    list(APPEND SRCS src/driver/opengl/PlatformDummyGL.cpp)
 endif()
 
 # ==================================================================================================
@@ -203,13 +206,13 @@ if (FILAMENT_SUPPORTS_VULKAN)
             src/driver/vulkan/VulkanStagePool.cpp
     )
     if (LINUX)
-        list(APPEND SRCS src/driver/vulkan/ContextManagerVkLinux.cpp)
+        list(APPEND SRCS src/driver/vulkan/PlatformVkLinux.cpp)
     elseif (APPLE)
-        list(APPEND SRCS src/driver/vulkan/ContextManagerVkCocoa.mm)
+        list(APPEND SRCS src/driver/vulkan/PlatformVkCocoa.mm)
     elseif (ANDROID)
-        list(APPEND SRCS src/driver/vulkan/ContextManagerVkAndroid.cpp)
+        list(APPEND SRCS src/driver/vulkan/PlatformVkAndroid.cpp)
     elseif (WIN32)
-        list(APPEND SRCS src/driver/vulkan/ContextManagerVkWindows.cpp)
+        list(APPEND SRCS src/driver/vulkan/PlatformVkWindows.cpp)
     endif()
 endif()
 

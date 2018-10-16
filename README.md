@@ -6,9 +6,8 @@
 <img alt="Windows" src="build/img/windows.png" width="20px" height="20px" hspace="2px"/>[![Windows Build Status](https://filament-build.storage.googleapis.com/badges/build_status_windows.svg)](https://filament-build.storage.googleapis.com/badges/build_link_windows.html)
 <img alt="Web" src="build/img/web.png" width="20px" height="20px" hspace="2px"/>[![Web Build Status](https://filament-build.storage.googleapis.com/badges/build_status_web.svg)](https://filament-build.storage.googleapis.com/badges/build_link_web.html)
 
-Filament is a real-time physically based rendering engine for Android, Linux, macOS and Windows.
-This rendering engine was designed to be as small as possible and as efficient as possible
-on Android.
+Filament is a real-time physically based rendering engine for Android, Linux, macOS, Windows, and
+WebGL. It is designed to be as small as possible and as efficient as possible on Android.
 
 Filament is currently used in the
 [Sceneform](https://developers.google.com/ar/develop/java/sceneform/) library both at runtime on
@@ -18,11 +17,8 @@ Android devices and as the renderer inside the Android Studio plugin.
 
 [Download Filament releases](https://github.com/google/filament/releases) to access stable builds.
 
-If you prefer to live on the edge, you can download continuous builds directly:
-- [Android](https://filament-build.storage.googleapis.com/badges/build_link_android.html)
-- [Linux](https://filament-build.storage.googleapis.com/badges/build_link_linux.html)
-- [macOS](https://filament-build.storage.googleapis.com/badges/build_link_mac.html)
-- [Windows](https://filament-build.storage.googleapis.com/badges/build_link_windows.html)
+If you prefer to live on the edge, you can download a continuous build by clicking one of the build
+badges above.
 
 ## Documentation
 
@@ -226,12 +222,13 @@ Make sure you've installed the following dependencies:
 - `libc++-dev` (`libcxx-devel` on Fedora)
 - `libc++abi-dev`
 - `ninja-build`
-
-In addition your distribution might require:
-
 - `libxi-dev`
 
-Then invoke `cmake`:
+After dependencies have been installed, we highly recommend using the [easy build](#easy-build)
+script.
+
+If you'd like to run `cmake` directly rather than using the build script, it can be invoked as
+follows, with some caveats that are explained further down.
 
 ```
 $ mkdir out/cmake-release
@@ -677,11 +674,15 @@ productFlavors {
 
 ### WebAssembly
 
-As an experimental feature, the core Filament library can be cross-compiled to WebAssembly from
-either macOS or Linux. To get started, install the Emscripten SDK as follows:
+The core Filament library can be cross-compiled to WebAssembly from either macOS or Linux. To get
+started, follow the instructions for building Filament on your platform ([macOS](#macos) or
+[linux](#linux)), which will ensure you have the proper dependencies installed.
+
+Next, you need to install the Emscripten SDK. The following instructions show how to install the
+same version that our continuous builds use.
 
 ```
-cd <your chosen home for the emscripten SDK>
+cd <your chosen parent folder for the emscripten SDK>
 curl -L https://github.com/juj/emsdk/archive/0d8576c.zip > emsdk.zip
 unzip emsdk.zip
 mv emsdk-* emsdk
@@ -689,18 +690,30 @@ cd emsdk
 ./emsdk update
 ./emsdk install sdk-1.38.11-64bit
 ./emsdk activate sdk-1.38.11-64bit
-export EMSDK=$PWD
 ```
 
-The last line in the above snippet is required so that our build script can find the Emscripten SDK.
-After this you can invoke our standard build script with `-p webgl`.
+After this you can invoke [easy build](#easy-build) script as follows:
 
-Invoking the [easy build](#easy-build) script with `-p webgl` creates a `public` folder in
-`out/cmake-web-release/samples/web`. This folder can be used as the root of a simple static web
-server. Each sample app has its own handwritten html file, wasm file, and js loader. Additionally
-the public folder contains meshes, textures, and the tiny `filaweb.js` library.
+```
+export EMSDK=<your chosen home for the emscripten SDK>
+./build.sh -p webgl release
+```
 
-## Running the samples
+The EMSDK variable is required so that the build script can find the Emscripten SDK. The build
+creates a `public` folder that can be used as the root of a simple static web server. Note that you
+cannot open the HTML directly from the filesystem due to CORS. One way to deal with this is to
+use Python to create a quick localhost server:
+
+```
+cd out/cmake-webgl-release/samples/web/public
+python3 -m http.server     # Python 3
+python -m SimpleHTTPServer # Python 2.7
+```
+
+Each sample app has its own handwritten html file, wasm file, and js loader. Additionally the public
+folder contains meshes, textures, and the tiny `filaweb.js` library.
+
+## Running the native samples
 
 The `samples/` directory contains several examples of how to use Filament with SDL2.
 

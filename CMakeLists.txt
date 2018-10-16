@@ -248,6 +248,21 @@ else()
 endif()
 
 # ==================================================================================================
+# Try to find Vulkan if the SDK is installed, otherwise fall back to the bundled version.
+# This needs to stay in our top-level CMakeLists because it sets up variables that are used by the
+# "bluevk" and "samples" targets.
+# ==================================================================================================
+
+if (FILAMENT_SUPPORTS_VULKAN AND APPLE)
+    find_library(Vulkan_LIBRARY NAMES vulkan HINTS "$ENV{VULKAN_SDK}/lib" "$ENV{VULKAN_SDK}/macOS/lib")
+    if (Vulkan_LIBRARY)
+        set(Vulkan_FOUND ON)
+        message(STATUS "Found Vulkan library in SDK: ${Vulkan_LIBRARY}.")
+        add_definitions(-DFILAMENT_VKLIBRARY_PATH=\"${Vulkan_LIBRARY}\")
+    endif()
+endif()
+
+# ==================================================================================================
 # Sub-projects
 # ==================================================================================================
 # Common to all platforms
@@ -277,6 +292,7 @@ if (WEBGL)
     add_subdirectory(${FILAMENT}/samples/web)
 
     add_subdirectory(${LIBRARIES}/filagui)
+    add_subdirectory(${LIBRARIES}/filamentjs)
 
     add_subdirectory(${EXTERNAL}/imgui/tnt)
     add_subdirectory(${EXTERNAL}/stb/tnt)
@@ -294,6 +310,8 @@ if (NOT ANDROID AND NOT WEBGL)
     # must come first because of glslang
     add_subdirectory(${EXTERNAL}/spirv-tools)
 
+    add_subdirectory(${EXTERNAL}/astcenc/tnt)
+    add_subdirectory(${EXTERNAL}/etc2comp)
     add_subdirectory(${EXTERNAL}/getopt)
     add_subdirectory(${EXTERNAL}/glslang/tnt)
     add_subdirectory(${EXTERNAL}/imgui/tnt)
@@ -319,5 +337,5 @@ endif()
 
 # Generate exported executables for cross-compiled builds (Android and WebGL)
 if (NOT CMAKE_CROSSCOMPILING)
-    export(TARGETS matc cmgen filamesh FILE ${IMPORT_EXECUTABLES})
+    export(TARGETS matc cmgen filamesh mipgen FILE ${IMPORT_EXECUTABLES})
 endif()

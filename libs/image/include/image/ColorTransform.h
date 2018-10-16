@@ -141,23 +141,23 @@ inline math::float3 linearToSRGB(const math::float3& color) {
     return sRGBColor;
 }
 
-// Creates a 3-channel sRGB u8 image from a linear f32 image.
-// The source image can have three or more channels, but only the first three are honored.
-template <typename T>
+// Creates a n-channel sRGB image from a linear floating-point image.
+// The source image can have more than N channels, but only the first N are honored.
+template <typename T, int N = 3>
 std::unique_ptr<uint8_t[]> fromLinearTosRGB(const LinearImage& image) {
-    using math::float3;
-    size_t w = image.getWidth();
-    size_t h = image.getHeight();
-    UTILS_UNUSED_IN_RELEASE size_t channels = image.getChannels();
-    assert(channels >= 3);
-    std::unique_ptr<uint8_t[]> dst(new uint8_t[w * h * 3 * sizeof(T)]);
+    const size_t w = image.getWidth();
+    const size_t h = image.getHeight();
+    const size_t nchan = image.getChannels();
+    assert(nchan >= N);
+    std::unique_ptr<uint8_t[]> dst(new uint8_t[w * h * N * sizeof(T)]);
     T* d = reinterpret_cast<T*>(dst.get());
     for (size_t y = 0; y < h; ++y) {
-        for (size_t x = 0; x < w; ++x, d += 3) {
-            auto src = image.get<float3>((uint32_t) x, (uint32_t) y);
-            float3 l(linearTosRGB(saturate(*src)) * std::numeric_limits<T>::max());
-            for (size_t i = 0; i < 3; i++) {
-                d[i] = T(l[i]);
+        float const* p = image.getPixelRef(0, y);
+        for (size_t x = 0; x < w; ++x, p += nchan, d += N) {
+            for (int n = 0; n < N; n++) {
+                float source = linearTosRGB(p[n]);
+                float target = math::saturate(source) * std::numeric_limits<T>::max();
+                d[n] = T(target);
             }
         }
     }
@@ -292,6 +292,20 @@ inline LinearImage toLinearFromRGBM(math::float4 const* src, uint32_t w, uint32_
     for (uint32_t row = 0; row < h; ++row) {
         for (uint32_t col = 0; col < w; ++col, ++src, ++dst) {
             *dst = RGBMtoLinear(*src);
+        }
+    }
+    return result;
+}
+
+inline LinearImage fromLinearToRGBM(const LinearImage& image) {
+    assert(image.getChannels() == 3);
+    const uint32_t w = image.getWidth(), h = image.getHeight();
+    LinearImage result(w, h, 4);
+    auto src = image.get<math::float3>();
+    auto dst = result.get<math::float4>();
+    for (uint32_t row = 0; row < h; ++row) {
+        for (uint32_t col = 0; col < w; ++col, ++src, ++dst) {
+            *dst = linearToRGBM(*src);
         }
     }
     return result;

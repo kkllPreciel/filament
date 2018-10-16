@@ -39,10 +39,10 @@ static constexpr bool SWAPCHAIN_HAS_DEPTH = true;
 namespace filament {
 namespace driver {
 
-VulkanDriver::VulkanDriver(ContextManagerVk* externalContext,
+VulkanDriver::VulkanDriver(VulkanPlatform* platform,
         const char* const* ppEnabledExtensions, uint32_t enabledExtensionCount) noexcept :
         DriverBase(new ConcreteDispatcher<VulkanDriver>(this)),
-        mContextManager(*externalContext), mStagePool(mContext), mFramebufferCache(mContext),
+        mContextManager(*platform), mStagePool(mContext), mFramebufferCache(mContext),
         mSamplerCache(mContext) {
     mContext.rasterState = mBinder.getDefaultRasterState();
 
@@ -158,12 +158,12 @@ VulkanDriver::VulkanDriver(ContextManagerVk* externalContext,
 
 VulkanDriver::~VulkanDriver() noexcept = default;
 
-std::unique_ptr<Driver> VulkanDriver::create(ContextManagerVk* const externalContext,
+Driver* VulkanDriver::create(VulkanPlatform* const platform,
         const char* const* ppEnabledExtensions, uint32_t enabledExtensionCount) noexcept {
-    assert(externalContext);
-    auto* const driver = new VulkanDriver(externalContext, ppEnabledExtensions,
+    assert(platform);
+    auto* const driver = new VulkanDriver(platform, ppEnabledExtensions,
             enabledExtensionCount);
-    return std::unique_ptr<Driver>(driver);
+    return driver;
 }
 
 ShaderModel VulkanDriver::getShaderModel() const noexcept {
@@ -226,6 +226,9 @@ void VulkanDriver::beginFrame(uint64_t monotonic_clock_ns, uint32_t frameId) {
     mStagePool.gc();
     mFramebufferCache.gc();
     mBinder.gc();
+}
+
+void VulkanDriver::setPresentationTime(uint64_t monotonic_clock_ns) {
 }
 
 void VulkanDriver::endFrame(uint32_t frameId) {
@@ -521,14 +524,14 @@ void VulkanDriver::load2DImage(Driver::TextureHandle th,
         PixelBufferDescriptor&& data) {
     assert(data.type != driver::PixelDataType::COMPRESSED && "Compression not yet supported.");
     assert(xoffset == 0 && yoffset == 0 && "Offsets not yet supported.");
-    handle_cast<VulkanTexture>(mHandleMap, th)->load2DImage(std::move(data), width, height, level);
+    handle_cast<VulkanTexture>(mHandleMap, th)->load2DImage(data, width, height, level);
     scheduleDestroy(std::move(data));
 }
 
 void VulkanDriver::loadCubeImage(Driver::TextureHandle th, uint32_t level,
         PixelBufferDescriptor&& data, FaceOffsets faceOffsets) {
     assert(data.type != driver::PixelDataType::COMPRESSED && "Compression not yet supported.");
-    handle_cast<VulkanTexture>(mHandleMap, th)->loadCubeImage(std::move(data), faceOffsets, level);
+    handle_cast<VulkanTexture>(mHandleMap, th)->loadCubeImage(data, faceOffsets, level);
     scheduleDestroy(std::move(data));
 }
 
@@ -541,13 +544,10 @@ void VulkanDriver::setExternalStream(Driver::TextureHandle th, Driver::StreamHan
 void VulkanDriver::generateMipmaps(Driver::TextureHandle th) {
 }
 
-void VulkanDriver::updateUniformBuffer(Driver::UniformBufferHandle ubh,
-        UniformBuffer&& uniformBuffer) {
+void VulkanDriver::updateUniformBuffer(Driver::UniformBufferHandle ubh, BufferDescriptor&& data) {
     auto* buffer = handle_cast<VulkanUniformBuffer>(mHandleMap, ubh);
-    if (uniformBuffer.isDirty()) {
-        buffer->loadFromCpu(uniformBuffer.getBuffer(), (uint32_t) uniformBuffer.getSize());
-    }
-    buffer->ub = std::move(uniformBuffer);
+    buffer->loadFromCpu(data.buffer, (uint32_t) data.size);
+    scheduleDestroy(std::move(data));
 }
 
 void VulkanDriver::updateSamplerBuffer(Driver::SamplerBufferHandle sbh,
@@ -690,8 +690,10 @@ void VulkanDriver::setViewportScissor(
     vkCmdSetScissor(mContext.cmdbuffer, 0, 1, &scissor);
 }
 
-void VulkanDriver::makeCurrent(Driver::SwapChainHandle sch) {
-    VulkanSurfaceContext& sContext = handle_cast<VulkanSwapChain>(mHandleMap, sch)->surfaceContext;
+void VulkanDriver::makeCurrent(Driver::SwapChainHandle drawSch, Driver::SwapChainHandle readSch) {
+    ASSERT_PRECONDITION_NON_FATAL(drawSch == readSch,
+                                  "Vulkan driver does not support distinct draw/read swap chains.");
+    VulkanSurfaceContext& sContext = handle_cast<VulkanSwapChain>(mHandleMap, drawSch)->surfaceContext;
     mContext.currentSurface = &sContext;
 }
 
@@ -739,9 +741,18 @@ void VulkanDriver::viewport(ssize_t left, ssize_t bottom, size_t width, size_t h
     vkCmdSetViewport(mContext.cmdbuffer, 0, 1, &viewport);
 }
 
-void VulkanDriver::bindUniforms(size_t index, Driver::UniformBufferHandle ubh) {
+void VulkanDriver::bindUniformBuffer(size_t index, Driver::UniformBufferHandle ubh) {
     auto* buffer = handle_cast<VulkanUniformBuffer>(mHandleMap, ubh);
-    mBinder.bindUniformBuffer((uint32_t) index, buffer->getGpuBuffer());
+    // The driver API does not currently expose offset / range, but it will do so in the future.
+    const VkDeviceSize offset = 0;
+    const VkDeviceSize size = VK_WHOLE_SIZE;
+    mBinder.bindUniformBuffer((uint32_t) index, buffer->getGpuBuffer(), offset, size);
+}
+
+void VulkanDriver::bindUniformBufferRange(size_t index, Driver::UniformBufferHandle ubh,
+        size_t offset, size_t size) {
+    auto* buffer = handle_cast<VulkanUniformBuffer>(mHandleMap, ubh);
+    mBinder.bindUniformBuffer((uint32_t)index, buffer->getGpuBuffer(), offset, size);
 }
 
 void VulkanDriver::bindSamplers(size_t index, Driver::SamplerBufferHandle sbh) {

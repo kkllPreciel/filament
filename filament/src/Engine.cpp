@@ -71,8 +71,8 @@ namespace details {
 static std::unordered_map<Engine const*, std::unique_ptr<FEngine>> sEngines;
 static std::mutex sEnginesLock;
 
-FEngine* FEngine::create(Backend backend, ExternalContext* externalContext, void* sharedGLContext) {
-    FEngine* instance = new FEngine(backend, externalContext, sharedGLContext);
+FEngine* FEngine::create(Backend backend, Platform* platform, void* sharedGLContext) {
+    FEngine* instance = new FEngine(backend, platform, sharedGLContext);
 
     slog.i << "FEngine (" << sizeof(void*) * 8 << " bits) created at " << instance << " "
             << "(threading is " << (UTILS_HAS_THREADING ? "enabled)" : "disabled)") << io::endl;
@@ -83,8 +83,13 @@ FEngine* FEngine::create(Backend backend, ExternalContext* externalContext, void
     // Normally we launch a thread and create the context and Driver from there (see FEngine::loop).
     // In the single-threaded case, we do so in the here and now.
     if (!UTILS_HAS_THREADING) {
-        instance->mExternalContext = ExternalContext::create(&instance->mBackend);
-        instance->mDriver = instance->mExternalContext->createDriver(sharedGLContext);
+        // we don't own the external context at that point, set it to null
+        instance->mPlatform = nullptr;
+        if (platform == nullptr) {
+            platform = Platform::create(&instance->mBackend);
+            instance->mPlatform = platform;
+        }
+        instance->mDriver = platform->createDriver(sharedGLContext);
         instance->init();
         instance->execute();
         return instance;
@@ -112,10 +117,6 @@ UniformInterfaceBlock FEngine::PerViewUib::getUib() noexcept {
     return UibGenerator::getPerViewUib();
 }
 
-UniformInterfaceBlock FEngine::PerRenderableUib::getUib() noexcept {
-    return UibGenerator::getPerRenderableUib();
-}
-
 UniformInterfaceBlock FEngine::PostProcessingUib::getUib() noexcept {
     return UibGenerator::getPostProcessingUib();
 }
@@ -138,9 +139,9 @@ static const half4 sFullScreenTriangleVertices[3] = {
 // these must be static because only a pointer is copied to the render stream
 static const uint16_t sFullScreenTriangleIndices[3] = { 0, 1, 2 };
 
-FEngine::FEngine(Backend backend, ExternalContext* externalContext, void* sharedGLContext) :
+FEngine::FEngine(Backend backend, Platform* platform, void* sharedGLContext) :
         mBackend(backend),
-        mExternalContext(externalContext),
+        mPlatform(platform),
         mSharedGLContext(sharedGLContext),
         mEntityManager(EntityManager::get()),
         mRenderableManager(*this),
@@ -148,7 +149,6 @@ FEngine::FEngine(Backend backend, ExternalContext* externalContext, void* shared
         mLightManager(*this),
         mCameraManager(*this),
         mPerViewUib(PerViewUib::getUib()),
-        mPerRenderableUib(PerRenderableUib::getUib()),
         mPerViewSib(PerViewSib::getSib()),
         mPostProcessUib(PostProcessingUib::getUib()),
         mPostProcessSib(PostProcessSib::getSib()),
@@ -208,7 +208,8 @@ void FEngine::init() {
 
     mDefaultIblTexture = upcast(Texture::Builder()
             .width(1).height(1).levels(1)
-            .format(Texture::InternalFormat::RGBM)
+            .format(Texture::InternalFormat::RGBA8)
+            .rgbm(true)
             .sampler(Texture::Sampler::SAMPLER_CUBEMAP)
             .build(*this));
     static uint32_t pixel = 0;
@@ -240,6 +241,8 @@ void FEngine::init() {
 
 FEngine::~FEngine() noexcept {
     ASSERT_DESTRUCTOR(mTerminated, "Engine destroyed but not terminated!");
+    delete mDriver;
+    Platform::destroy(&mPlatform);
 }
 
 void FEngine::shutdown() {
@@ -315,10 +318,11 @@ void FEngine::shutdown() {
     if (UTILS_HAS_THREADING) {
         mDriverThread.join();
     }
-    mTerminated = true;
 
     // detach this thread from the jobsystem
     mJobSystem.emancipate();
+
+    mTerminated = true;
 }
 
 void FEngine::prepare() {
@@ -360,14 +364,19 @@ void FEngine::flush() {
 // -----------------------------------------------------------------------------------------------
 
 int FEngine::loop() {
-    if (mExternalContext == nullptr) {
-        mExternalContext = ExternalContext::create(&mBackend);
+    // we don't own the external context at that point, set it to null
+    Platform* platform = mPlatform;
+    mPlatform = nullptr;
+
+    if (platform == nullptr) {
+        platform = Platform::create(&mBackend);
+        mPlatform = platform;
 #if !defined(NDEBUG)
         slog.d << "FEngine resolved backend: "
                << (mBackend == driver::Backend::VULKAN ? "Vulkan" : "OpenGL") << io::endl;
 #endif
     }
-    mDriver = mExternalContext->createDriver(mSharedGLContext);
+    mDriver = platform->createDriver(mSharedGLContext);
     mDriverBarrier.latch();
     if (UTILS_UNLIKELY(!mDriver)) {
         // if we get here, it's because the driver couldn't be initialized and the problem has
@@ -403,11 +412,11 @@ void FEngine::flushCommandBuffer(CommandBufferQueue& commandQueue) {
     commandQueue.flush();
 }
 
-const FMaterial* FEngine::getSkyboxMaterial(driver::TextureFormat format) const noexcept {
-    size_t index = (format == driver::TextureFormat::RGBM) ? 0 : 1;
+const FMaterial* FEngine::getSkyboxMaterial(bool rgbm) const noexcept {
+    size_t index = rgbm ? 0 : 1;
     FMaterial const* material = mSkyboxMaterials[index];
     if (UTILS_UNLIKELY(material == nullptr)) {
-        material = FSkybox::createMaterial(*const_cast<FEngine*>(this), format);
+        material = FSkybox::createMaterial(*const_cast<FEngine*>(this), rgbm);
         mSkyboxMaterials[index] = material;
     }
     return material;
@@ -758,8 +767,8 @@ EnginePerformanceTest::PFN EnginePerformanceTest::getDestroyUniverseApi() {
 
 using namespace details;
 
-Engine* Engine::create(Backend backend, ExternalContext* externalContext, void* sharedGLContext) {
-    std::unique_ptr<FEngine> engine(FEngine::create(backend, externalContext, sharedGLContext));
+Engine* Engine::create(Backend backend, Platform* platform, void* sharedGLContext) {
+    std::unique_ptr<FEngine> engine(FEngine::create(backend, platform, sharedGLContext));
     if (UTILS_UNLIKELY(!engine)) {
         // something went wrong during the driver or engine initialization
         return nullptr;

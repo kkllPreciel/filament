@@ -14,16 +14,18 @@
  * limitations under the License.
  */
 
-#include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <fstream>
-
 #include <iomanip>
+#include <iostream>
+#include <sstream>
 
 #include <math/scalar.h>
 #include <math/vec4.h>
 
+#include <image/KtxBundle.h>
+
+#include <imageio/BlockCompression.h>
 #include <imageio/ImageDecoder.h>
 #include <imageio/ImageEncoder.h>
 
@@ -45,7 +47,16 @@ using namespace image;
 enum class ShFile {
     SH_NONE, SH_CROSS, SH_TEXT
 };
+
+static const size_t DFG_LUT_DEFAULT_SIZE = 128;
+static const size_t IBL_DEFAULT_SIZE = 256;
+
+enum class OutputType {
+    FACES, KTX, EQUIRECT, OCTAHEDRON
+};
+
 static image::ImageEncoder::Format g_format = image::ImageEncoder::Format::PNG;
+static OutputType g_type = OutputType::FACES;
 static std::string g_compression;
 static bool g_extract_faces = false;
 static double g_extract_blur = 0.0;
@@ -62,6 +73,7 @@ static bool g_sh_shader = false;
 static bool g_sh_irradiance = false;
 static ShFile g_sh_file = ShFile::SH_NONE;
 static utils::Path g_sh_filename;
+static std::unique_ptr<math::double3[]> g_coefficients;
 
 static bool g_is_mipmap = false;
 static utils::Path g_is_mipmap_dir;
@@ -91,13 +103,15 @@ static void iblDiffuseIrradiance(const utils::Path& iname, const std::vector<Cub
         const utils::Path& dir);
 static void iblMipmapPrefilter(const utils::Path& iname, const std::vector<Image>& images,
         const std::vector<Cubemap>& levels, const utils::Path& dir);
-static void iblLutDfg(const utils::Path& filename, size_t size = 128, bool multiscatter = false);
+static void iblLutDfg(const utils::Path& filename, size_t size, bool multiscatter = false);
 static void extractCubemapFaces(const utils::Path& iname, const Cubemap& cm, const utils::Path& dir);
 static void outputSh(std::ostream& out, const std::unique_ptr<math::double3[]>& sh, size_t numBands);
 static void outputSpectrum(std::ostream& out, const std::unique_ptr<math::double3[]>& sh,
         size_t numBands);
 static void saveImage(const std::string& path, ImageEncoder::Format format, const Image& image,
         const std::string& compression);
+static LinearImage toLinearImage(const Image& image);
+static void exportKtxFaces(KtxBundle& container, uint32_t miplevel, const Cubemap& cm);
 
 // -----------------------------------------------------------------------------------------------
 
@@ -127,10 +141,20 @@ static void printUsage(char* name) {
             "       Print copyright and license information\n\n"
             "   --quiet, -q\n"
             "       Quiet mode. Suppress all non-error output\n\n"
-            "   --format=[exr|hdr|psd|rgbm|png|dds], -f [exr|hdr|psd|rgbm|png|dds]\n"
-            "       Specify output file format\n\n"
+            "   --type=[cubemap|equirect|octahedron|ktx], -t [cubemap|equirect|octahedron|ktx]\n"
+            "       Specify output type (default: cubemap)\n\n"
+            "   --format=[exr|hdr|psd|rgbm|png|dds|ktx], -f [exr|hdr|psd|rgbm|png|dds|ktx]\n"
+            "       Specify output file format. ktx implies -type=ktx.\n"
+            "       KTX files are always encoded with 4-channel RGBM data\n\n"
             "   --compression=COMPRESSION, -c COMPRESSION\n"
             "       Format specific compression:\n"
+            "           KTX:\n"
+            "             astc_[fast|thorough]_[ldr|hdr]_WxH, where WxH is a valid block size\n"
+            "             s3tc_rgba_dxt5\n"
+            "             etc_FORMAT_METRIC_EFFORT\n"
+            "               FORMAT is rgb8_alpha, srgb8_alpha, rgba8, or srgb8_alpha8\n"
+            "               METRIC is rgba, rgbx, rec709, numeric, or normalxyz\n"
+            "               EFFORT is an integer between 0 and 100\n"
             "           PNG: Ignored\n"
             "           PNG RGBM: Ignored\n"
             "           Radiance: Ignored\n"
@@ -145,8 +169,8 @@ static void printUsage(char* name) {
             "       Extract faces of the cubemap into <dir>\n\n"
             "   --extract-blur=roughness\n"
             "       Blurs the cubemap before saving the faces using the roughness blur\n\n"
-            "   --mirror\n"
-            "       Mirrors generated cubemaps for reflections\n\n"
+            "   --no-mirror\n"
+            "       Skip mirroring of generated cubemaps (for assets with mirroring already backed in)\n\n"
             "   --ibl-samples=numSamples\n"
             "       Number of samples to use for IBL integrations (default 1024)\n\n"
             "\n"
@@ -186,11 +210,12 @@ static void license() {
 }
 
 static int handleCommandLineArgments(int argc, char* argv[]) {
-    static constexpr const char* OPTSTR = "hqidf:c:s:x:";
+    static constexpr const char* OPTSTR = "hqidt:f:c:s:x:";
     static const struct option OPTIONS[] = {
             { "help",                       no_argument, nullptr, 'h' },
             { "license",                    no_argument, nullptr, 'l' },
             { "quiet",                      no_argument, nullptr, 'q' },
+            { "type",                 required_argument, nullptr, 't' },
             { "format",               required_argument, nullptr, 'f' },
             { "compression",          required_argument, nullptr, 'c' },
             { "size",                 required_argument, nullptr, 's' },
@@ -207,7 +232,7 @@ static int handleCommandLineArgments(int argc, char* argv[]) {
             { "ibl-dfg-multiscatter",       no_argument, nullptr, 'u' },
             { "ibl-samples",          required_argument, nullptr, 'k' },
             { "deploy",               required_argument, nullptr, 'x' },
-            { "mirror",                     no_argument, nullptr, 'm' },
+            { "no-mirror",                  no_argument, nullptr, 'm' },
             { "debug",                      no_argument, nullptr, 'd' },
             { nullptr, 0, 0, 0 }  // termination of the option list
     };
@@ -215,6 +240,8 @@ static int handleCommandLineArgments(int argc, char* argv[]) {
     int option_index = 0;
     int num_sh_bands = 3;
     bool format_specified = false;
+    bool type_specified = false;
+    bool ktx_format_requested = false;
     while ((opt = getopt_long(argc, argv, OPTSTR, OPTIONS, &option_index)) >= 0) {
         std::string arg(optarg ? optarg : "");
         switch (opt) {
@@ -229,6 +256,24 @@ static int handleCommandLineArgments(int argc, char* argv[]) {
                 break;
             case 'q':
                 g_quiet = true;
+                break;
+            case 't':
+                if (arg == "cubemap") {
+                    g_type = OutputType::FACES;
+                    type_specified = true;
+                }
+                if (arg == "ktx") {
+                    g_type = OutputType::KTX;
+                    type_specified = true;
+                }
+                if ((arg == "equirect") || (arg == "equirectangular")) {
+                    g_type = OutputType::EQUIRECT;
+                    type_specified = true;
+                }
+                if (arg == "octahedron") {
+                    g_type = OutputType::OCTAHEDRON;
+                    type_specified = true;
+                }
                 break;
             case 'f':
                 if (arg == "png") {
@@ -253,6 +298,10 @@ static int handleCommandLineArgments(int argc, char* argv[]) {
                 }
                 if (arg == "dds") {
                     g_format = ImageEncoder::Format::DDS_LINEAR;
+                    format_specified = true;
+                }
+                if (arg == "ktx") {
+                    ktx_format_requested = true;
                     format_specified = true;
                 }
                 break;
@@ -340,6 +389,15 @@ static int handleCommandLineArgments(int argc, char* argv[]) {
         }
     }
 
+    if (ktx_format_requested) {
+        g_type = OutputType::KTX;
+        type_specified = true;
+    }
+
+    if (g_deploy && !type_specified) {
+        g_type = OutputType::FACES;
+    }
+
     if (g_deploy && !format_specified) {
         g_format = ImageEncoder::Format::RGBM;
     }
@@ -362,7 +420,7 @@ int main(int argc, char* argv[]) {
         if (!g_quiet) {
             std::cout << "Generating IBL DFG LUT..." << std::endl;
         }
-        size_t size = g_output_size ? g_output_size : 128;
+        size_t size = g_output_size ? g_output_size : DFG_LUT_DEFAULT_SIZE;
         iblLutDfg(g_dfg_filename, size, g_dfg_multiscatter);
         if (num_args < 1) return 0;
     }
@@ -432,28 +490,25 @@ int main(int argc, char* argv[]) {
         if ((isPOT(width) && (width * 3 == height * 4)) ||
             (isPOT(height) && (height * 3 == width * 4))) {
             // This is cross cubemap
-            const bool isHorizontal = width > height;
-            size_t dim = std::max(height, width) / 4;
+            size_t dim = g_output_size ? g_output_size : IBL_DEFAULT_SIZE;
             if (!g_quiet) {
                 std::cout << "Loading cross... " << std::endl;
             }
 
             Image temp;
-            Cubemap cml = CubemapUtils::create(temp, dim, isHorizontal);
-            CubemapUtils::copyImage(temp, inputImage);
-            cml.makeSeamless();
+            Cubemap cml = CubemapUtils::create(temp, dim);
+            CubemapUtils::crossToCubemap(cml, inputImage);
             images.push_back(std::move(temp));
             levels.push_back(std::move(cml));
         } else if (width == 2 * height) {
             // we assume a spherical (equirectangular) image, which we will convert to a cross image
-            size_t dim = g_output_size ? g_output_size : 256;
+            size_t dim = g_output_size ? g_output_size : IBL_DEFAULT_SIZE;
             if (!g_quiet) {
                 std::cout << "Converting equirectangular image... " << std::endl;
             }
             Image temp;
             Cubemap cml = CubemapUtils::create(temp, dim);
             CubemapUtils::equirectangularToCubemap(cml, inputImage);
-            cml.makeSeamless();
             images.push_back(std::move(temp));
             levels.push_back(std::move(cml));
         } else {
@@ -469,50 +524,51 @@ int main(int argc, char* argv[]) {
             std::cout << iname << " does not exist; generating UV grid..." << std::endl;
         }
 
-        size_t dim = g_output_size ? g_output_size : 256;
+        size_t dim = g_output_size ? g_output_size : IBL_DEFAULT_SIZE;
         Image temp;
         Cubemap cml = CubemapUtils::create(temp, dim);
 
         unsigned int p = 0;
         std::string name = iname.getNameWithoutExtension();
         if (sscanf(name.c_str(), "uv%u", &p) == 1) {
-            CubemapUtils::generateUVGrid(cml, p);
+            CubemapUtils::generateUVGrid(cml, p, p);
+        } else if (sscanf(name.c_str(), "u%u", &p) == 1) {
+            CubemapUtils::generateUVGrid(cml, p, 1);
+        } else if (sscanf(name.c_str(), "v%u", &p) == 1) {
+            CubemapUtils::generateUVGrid(cml, 1, p);
         } else if (sscanf(name.c_str(), "brdf%u", &p) == 1) {
             double linear_roughness = sq(p / std::log2(dim));
             CubemapIBL::brdf(cml, linear_roughness);
         } else {
-            CubemapUtils::generateUVGrid(cml, 1);
+            CubemapUtils::generateUVGrid(cml, 1, 1);
         }
 
-        cml.makeSeamless();
         images.push_back(std::move(temp));
         levels.push_back(std::move(cml));
     }
 
-    // Now generate all the mipmap levels
-    generateMipmaps(levels, images);
-
+    // we mirror by default -- the mirror option in fact un-mirrors.
+    g_mirror = !g_mirror;
     if (g_mirror) {
         if (!g_quiet) {
             std::cout << "Mirroring..." << std::endl;
         }
-
-        std::vector<Cubemap> mirrorLevels;
-        std::vector<Image> mirrorImages;
-
-        for (auto& level : levels) {
-            Image temp;
-            Cubemap cml = CubemapUtils::create(temp, level.getDimensions());
-            CubemapUtils::mirrorCubemap(cml, level);
-            cml.makeSeamless();
-
-            mirrorImages.push_back(std::move(temp));
-            mirrorLevels.push_back(std::move(cml));
+        Image temp;
+        Cubemap cml = CubemapUtils::create(temp, levels[0].getDimensions());
+        CubemapUtils::mirrorCubemap(cml, levels[0]);
+        std::swap(levels[0], cml);
+        std::swap(images[0], temp);
+    } else {
+        if (!g_quiet) {
+            std::cout << "Skipped mirroring." << std::endl;
         }
-
-        std::swap(levels, mirrorLevels);
-        std::swap(images, mirrorImages);
     }
+
+    // make the cubemap seamless
+    levels[0].makeSeamless();
+
+    // Now generate all the mipmap levels
+    generateMipmaps(levels, images);
 
     if (g_sh_compute) {
         if (!g_quiet) {
@@ -549,7 +605,7 @@ int main(int argc, char* argv[]) {
             if (!g_quiet) {
                 std::cout << "Blurring..." << std::endl;
             }
-            const double linear_roughness = g_extract_blur*g_extract_blur;
+            const double linear_roughness = g_extract_blur * g_extract_blur;
             const size_t dim = g_output_size ? g_output_size : cm.getDimensions();
             Image image;
             Cubemap blurred = CubemapUtils::create(image, dim);
@@ -647,6 +703,8 @@ void sphericalHarmonics(const utils::Path& iname, const Cubemap& inputCubemap) {
             }
         }
     }
+    // Stash the computed coefficients in case we need to use them at a later stage (e.g. KTX gen)
+    g_coefficients = std::move(sh);
 }
 
 void outputSh(std::ostream& out,
@@ -702,6 +760,27 @@ void iblMipmapPrefilter(const utils::Path& iname,
         }
 
         std::string ext = ImageEncoder::chooseExtension(g_format);
+
+        if (g_type == OutputType::EQUIRECT) {
+            size_t dim = dst.getDimensions();
+            std::unique_ptr<uint8_t[]> buf(new uint8_t[dim * 2 * dim * sizeof(float3)]);
+            Image image(std::move(buf), dim * 2, dim, dim * 2 * sizeof(float3), sizeof(float3));
+            CubemapUtils::cubemapToEquirectangular(image, dst);
+            std::string filename = outputDir + ("is_m" + std::to_string(level) + ext);
+            saveImage(filename, g_format, image, g_compression);
+            continue;
+        }
+
+        if (g_type == OutputType::OCTAHEDRON) {
+            size_t dim = dst.getDimensions();
+            std::unique_ptr<uint8_t[]> buf(new uint8_t[dim * dim * sizeof(float3)]);
+            Image image(std::move(buf), dim, dim, dim * sizeof(float3), sizeof(float3));
+            CubemapUtils::cubemapToOctahedron(image, dst);
+            std::string filename = outputDir + ("is_m" + std::to_string(level) + ext);
+            saveImage(filename, g_format, image, g_compression);
+            continue;
+        }
+
         for (size_t i = 0; i < 6; i++) {
             Cubemap::Face face = (Cubemap::Face)i;
             std::string filename = outputDir
@@ -723,10 +802,26 @@ void iblRoughnessPrefilter(const utils::Path& iname,
     // This is useful for debugging.
     const bool DEBUG_FULL_RESOLUTION = false;
 
-    const size_t baseExp = __builtin_ctz(g_output_size ? g_output_size : 256);
+    const size_t baseExp = __builtin_ctz(g_output_size ? g_output_size : IBL_DEFAULT_SIZE);
     size_t numSamples = g_num_samples;
     const size_t numLevels = baseExp + 1;
-    for (ssize_t i=baseExp ; i>=0 ; --i) {
+
+    // It's convenient to create an empty KTX bundle on the stack in this scope, regardless of
+    // whether KTX is requested. It does not consume memory if empty.
+    KtxBundle container(numLevels, 1, true);
+    container.info() = {
+        .endianness = KtxBundle::ENDIAN_DEFAULT,
+        .glType = KtxBundle::UNSIGNED_BYTE,
+        .glTypeSize = 4,
+        .glFormat = KtxBundle::RGBA,
+        .glInternalFormat = KtxBundle::RGBA,
+        .glBaseInternalFormat = KtxBundle::RGBA,
+        .pixelWidth = 1U << baseExp,
+        .pixelHeight = 1U << baseExp,
+        .pixelDepth = 0,
+    };
+
+    for (ssize_t i = baseExp; i >= 0; --i) {
         const size_t dim = 1U << (DEBUG_FULL_RESOLUTION ? baseExp : i);
         const size_t level = baseExp - i;
         if (level >= 2) {
@@ -737,16 +832,22 @@ void iblRoughnessPrefilter(const utils::Path& iname,
                 numSamples *= 2;
             }
         }
-        const double roughness = saturate(level / (numLevels - 1.0));
-        const double linear_roughness = roughness * roughness;
+
+        const double lod = saturate(level / (numLevels - 1.0));
+        // map the lod to a linear_roughness,  here we're using ^2, but other mappings are possible.
+        // ==> lod = sqrt(linear_roughness)
+        const double linear_roughness = lod * lod;
         if (!g_quiet) {
-            std::cout << "Level " << level << ", roughness = " <<
-                      std::setprecision(3) << roughness << ", roughness(lin) = " << linear_roughness
-                      << std::endl;
+            std::cout << "Level " << level <<
+                    std::setprecision(3)
+                    << ", roughness(lin) = " << linear_roughness
+                    << ", roughness = " << sqrt(linear_roughness)
+                    << std::endl;
         }
         Image image;
         Cubemap dst = CubemapUtils::create(image, dim);
         CubemapIBL::roughnessFilter(dst, levels, linear_roughness, numSamples);
+        dst.makeSeamless();
 
         if (g_debug) {
             ImageEncoder::Format debug_format = ImageEncoder::Format::HDR;
@@ -757,12 +858,56 @@ void iblRoughnessPrefilter(const utils::Path& iname,
         }
 
         std::string ext = ImageEncoder::chooseExtension(g_format);
+
+        if (g_type == OutputType::KTX) {
+            exportKtxFaces(container, level, dst);
+            continue;
+        }
+
+        if (g_type == OutputType::EQUIRECT) {
+            std::unique_ptr<uint8_t[]> buf(new uint8_t[dim * 2 * dim * sizeof(float3)]);
+            Image image(std::move(buf), dim * 2, dim, dim * 2 * sizeof(float3), sizeof(float3));
+            CubemapUtils::cubemapToEquirectangular(image, dst);
+            std::string filename = outputDir + ("m" + std::to_string(level) + ext);
+            saveImage(filename, g_format, image, g_compression);
+            continue;
+        }
+
+        if (g_type == OutputType::OCTAHEDRON) {
+            std::unique_ptr<uint8_t[]> buf(new uint8_t[dim * dim * sizeof(float3)]);
+            Image image(std::move(buf), dim, dim, dim * sizeof(float3), sizeof(float3));
+            CubemapUtils::cubemapToOctahedron(image, dst);
+            std::string filename = outputDir + ("m" + std::to_string(level) + ext);
+            saveImage(filename, g_format, image, g_compression);
+            continue;
+        }
+
         for (size_t j = 0; j < 6; j++) {
             Cubemap::Face face = (Cubemap::Face) j;
             std::string filename = outputDir
                     + ("m" + std::to_string(level) + "_" + CubemapUtils::getFaceName(face) + ext);
             saveImage(filename, g_format, dst.getImageForFace(face), g_compression);
         }
+    }
+
+    if (g_type == OutputType::KTX) {
+        if (g_coefficients) {
+            std::ostringstream sstr;
+            for (ssize_t l = 0; l < g_sh_compute; l++) {
+                for (ssize_t m = -l; m <= l; m++) {
+                    auto v = g_coefficients[CubemapSH::getShIndex(m, (size_t) l)];
+                    sstr << v.r << " " << v.g << " " << v.b << "\n";
+                }
+            }
+            container.setMetadata("sh", sstr.str().c_str());
+        }
+        std::vector<uint8_t> fileContents(container.getSerializedLength());
+        container.serialize(fileContents.data(), fileContents.size());
+        std::string filename = iname.getNameWithoutExtension() + "_ibl.ktx";
+        auto fullpath = outputDir + filename;
+        std::ofstream outputStream(fullpath.c_str(), std::ios::out | std::ios::binary);
+        outputStream.write((const char*) fileContents.data(), fileContents.size());
+        outputStream.close();
     }
 }
 
@@ -773,7 +918,7 @@ void iblDiffuseIrradiance(const utils::Path& iname,
         outputDir.mkdirRecursive();
     }
 
-    const size_t baseExp = __builtin_ctz(g_output_size ? g_output_size : 256);
+    const size_t baseExp = __builtin_ctz(g_output_size ? g_output_size : IBL_DEFAULT_SIZE);
     size_t numSamples = g_num_samples;
     const size_t dim = 1U << baseExp;
     Image image;
@@ -864,17 +1009,63 @@ void extractCubemapFaces(const utils::Path& iname, const Cubemap& cm, const util
     if (!outputDir.exists()) {
         outputDir.mkdirRecursive();
     }
+
+    if (g_type == OutputType::KTX) {
+        const uint32_t dim = cm.getDimensions();
+        KtxBundle container(1, 1, true);
+        container.info() = {
+            .endianness = KtxBundle::ENDIAN_DEFAULT,
+            .glType = KtxBundle::UNSIGNED_BYTE,
+            .glTypeSize = 4,
+            .glFormat = KtxBundle::RGBA,
+            .glInternalFormat = KtxBundle::RGBA,
+            .glBaseInternalFormat = KtxBundle::RGBA,
+            .pixelWidth = dim,
+            .pixelHeight = dim,
+            .pixelDepth = 0,
+        };
+        exportKtxFaces(container, 0, cm);
+        std::string filename = iname.getNameWithoutExtension() + "_skybox.ktx";
+        auto fullpath = outputDir + filename;
+        std::vector<uint8_t> fileContents(container.getSerializedLength());
+        container.serialize(fileContents.data(), fileContents.size());
+        std::ofstream outputStream(fullpath.c_str(), std::ios::out | std::ios::binary);
+        outputStream.write((const char*) fileContents.data(), fileContents.size());
+        outputStream.close();
+        return;
+    }
+
     std::string ext = ImageEncoder::chooseExtension(g_format);
-    for (size_t i=0 ; i<6 ; i++) {
-        Cubemap::Face face = (Cubemap::Face)i;
+
+    if (g_type == OutputType::EQUIRECT) {
+        size_t dim = cm.getDimensions();
+        std::unique_ptr<uint8_t[]> buf(new uint8_t[dim * 2 * dim * sizeof(float3)]);
+        Image image(std::move(buf), dim * 2, dim, dim * 2 * sizeof(float3), sizeof(float3));
+        CubemapUtils::cubemapToEquirectangular(image, cm);
+        std::string filename = outputDir + ("skybox" + ext);
+        saveImage(filename, g_format, image, g_compression);
+        return;
+    }
+
+    if (g_type == OutputType::OCTAHEDRON) {
+        size_t dim = cm.getDimensions();
+        std::unique_ptr<uint8_t[]> buf(new uint8_t[dim * dim * sizeof(float3)]);
+        Image image(std::move(buf), dim, dim, dim * sizeof(float3), sizeof(float3));
+        CubemapUtils::cubemapToOctahedron(image, cm);
+        std::string filename = outputDir + ("skybox" + ext);
+        saveImage(filename, g_format, image, g_compression);
+        return;
+    }
+
+    for (size_t i = 0; i < 6; i++) {
+        Cubemap::Face face = (Cubemap::Face) i;
         std::string filename(outputDir + (CubemapUtils::getFaceName(face) + ext));
         saveImage(filename, g_format, cm.getImageForFace(face), g_compression);
     }
 }
 
-static void saveImage(const std::string& path, ImageEncoder::Format format, const Image& image,
-        const std::string& compression) {
-    std::ofstream outputStream(path, std::ios::binary | std::ios::trunc);
+// Converts a cmgen Image into a libimage LinearImage
+static LinearImage toLinearImage(const Image& image) {
     LinearImage linearImage(image.getWidth(), image.getHeight(), 3);
 
     // Copy row by row since the image has padding.
@@ -885,6 +1076,56 @@ static void saveImage(const std::string& path, ImageEncoder::Format format, cons
         float const* src = static_cast<float const*>(image.getPixelRef(0, row));
         memcpy(dst, src, w * 12);
     }
+    return linearImage;
+}
 
-    ImageEncoder::encode(outputStream, format, linearImage, compression, path);
+static void saveImage(const std::string& path, ImageEncoder::Format format, const Image& image,
+        const std::string& compression) {
+    std::ofstream outputStream(path, std::ios::binary | std::ios::trunc);
+    if (!ImageEncoder::encode(outputStream, format, toLinearImage(image), compression, path)) {
+        exit(1);
+    }
+}
+
+static void exportKtxFaces(KtxBundle& container, uint32_t miplevel, const Cubemap& cm) {
+    CompressionConfig compression {};
+    auto& info = container.info();
+    if (!g_compression.empty()) {
+        bool valid = parseOptionString(g_compression, &compression);
+        if (!valid) {
+            std::cerr << "Unrecognized compression: " << g_compression << std::endl;
+            exit(1);
+        }
+        // The KTX spec says the following for compressed textures: glTypeSize should 1,
+        // glFormat should be 0, and glBaseInternalFormat should be RED, RG, RGB, or RGBA.
+        // The glInternalFormat field is the only field that specifies the actual format.
+        info.glTypeSize = 1;
+        info.glFormat = 0;
+        info.glBaseInternalFormat = KtxBundle::RGBA;
+    }
+
+    const uint32_t dim = cm.getDimensions();
+    for (uint32_t j = 0; j < 6; j++) {
+        KtxBlobIndex blobIndex {(uint32_t) miplevel, 0, j};
+        Cubemap::Face face;
+        switch (j) {
+            case 0: face = Cubemap::Face::PX; break;
+            case 1: face = Cubemap::Face::NX; break;
+            case 2: face = Cubemap::Face::PY; break;
+            case 3: face = Cubemap::Face::NY; break;
+            case 4: face = Cubemap::Face::PZ; break;
+            case 5: face = Cubemap::Face::NZ; break;
+        }
+        LinearImage image = toLinearImage(cm.getImageForFace(face));
+
+        if (compression.type != CompressionConfig::INVALID) {
+            CompressedTexture tex = compressTexture(compression, fromLinearToRGBM(image));
+            container.setBlob(blobIndex, tex.data.get(), tex.size);
+            info.glInternalFormat = (uint32_t) tex.format;
+            continue;
+        }
+
+        auto uintData = fromLinearToRGBM<uint8_t>(image);
+        container.setBlob(blobIndex, uintData.get(), dim * dim * 4);
+    }
 }

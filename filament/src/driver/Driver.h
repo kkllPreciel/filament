@@ -28,14 +28,13 @@
 
 #include <filament/driver/PixelBufferDescriptor.h>
 #include <filament/driver/BufferDescriptor.h>
-#include <filament/driver/ExternalContext.h>
+#include <filament/driver/Platform.h>
 #include <filament/driver/DriverEnums.h>
 
 #include "driver/Handle.h"
 #include "driver/DriverApiForward.h"
 #include "driver/Program.h"
 #include "driver/SamplerBuffer.h"
-#include "driver/UniformBuffer.h"
 
 namespace filament {
 
@@ -122,7 +121,7 @@ public:
 
     struct TargetBufferInfo {
         // ctor for 2D textures
-        TargetBufferInfo(TextureHandle h, uint8_t level = 0) noexcept
+        TargetBufferInfo(TextureHandle h, uint8_t level = 0) noexcept // NOLINT(google-explicit-constructor)
                 : handle(h), level(level) { }
         // ctor for cubemaps
         TargetBufferInfo(TextureHandle h, uint8_t level, TextureCubemapFace face) noexcept
