@@ -9,19 +9,27 @@ void main() {
     #if defined(MATERIAL_HAS_ANISOTROPY) || defined(MATERIAL_HAS_NORMAL) || defined(MATERIAL_HAS_CLEAR_COAT_NORMAL)
         // Extract the normal and tangent in world space from the input quaternion
         // We encode the orthonormal basis as a quaternion to save space in the attributes
-        toTangentFrame(normalize(mesh_tangents), material.worldNormal, vertex_worldTangent);
+        toTangentFrame(mesh_tangents, material.worldNormal, vertex_worldTangent);
+
+        // We don't need to normalize here, even if there's a scale in the matrix
+        // because we ensure the worldFromModelNormalMatrix pre-scales the normal such that
+        // all its components are < 1.0. This precents the bitangent to exceed the range of fp16
+        // in the fragment shader, where we renormalize after interpolation
         vertex_worldTangent = objectUniforms.worldFromModelNormalMatrix * vertex_worldTangent;
         material.worldNormal = objectUniforms.worldFromModelNormalMatrix * material.worldNormal;
+
         #if defined(HAS_SKINNING)
             skinNormal(material.worldNormal, mesh_bone_indices, mesh_bone_weights);
             skinNormal(vertex_worldTangent, mesh_bone_indices, mesh_bone_weights);
         #endif
+
         // Reconstruct the bitangent from the normal and tangent. We don't bother with
         // normalization here since we'll do it after interpolation in the fragment stage
-        vertex_worldBitangent = cross(material.worldNormal, vertex_worldTangent) * sign(mesh_tangents.w);
+        vertex_worldBitangent =
+                cross(material.worldNormal, vertex_worldTangent) * sign(mesh_tangents.w);
     #else // MATERIAL_HAS_ANISOTROPY || MATERIAL_HAS_NORMAL
         // Without anisotropy or normal mapping we only need the normal vector
-        toTangentFrame(normalize(mesh_tangents), material.worldNormal);
+        toTangentFrame(mesh_tangents, material.worldNormal);
         material.worldNormal = objectUniforms.worldFromModelNormalMatrix * material.worldNormal;
         #if defined(HAS_SKINNING)
             skinNormal(material.worldNormal, mesh_bone_indices, mesh_bone_weights);
@@ -77,5 +85,11 @@ void main() {
     gl_Position = getSkinnedPosition();
 #else
     gl_Position = getClipFromWorldMatrix() * material.worldPosition;
+#endif
+
+#if defined(TARGET_VULKAN_ENVIRONMENT)
+    // In Vulkan, clip-space Z is [0,w] rather than [-w,+w] and Y is flipped.
+    gl_Position.y = -gl_Position.y;
+    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;
 #endif
 }

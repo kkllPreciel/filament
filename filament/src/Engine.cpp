@@ -33,12 +33,9 @@
 #include "details/View.h"
 #include "driver/Program.h"
 
-#include "PrecompiledMaterials.h"
+#include <private/filament/SibGenerator.h>
 
 #include <filament/Exposure.h>
-
-#include <private/filament/SibGenerator.h>
-#include <private/filament/UibGenerator.h>
 
 #include <filaflat/MaterialParser.h>
 #include <filaflat/ShaderBuilder.h>
@@ -56,6 +53,7 @@
 
 #include <stdio.h>
 
+#include "generated/resources/materials.h"
 
 using namespace math;
 using namespace utils;
@@ -113,21 +111,6 @@ FEngine* FEngine::create(Backend backend, Platform* platform, void* sharedGLCont
     return instance;
 }
 
-UniformInterfaceBlock FEngine::PerViewUib::getUib() noexcept {
-    return UibGenerator::getPerViewUib();
-}
-
-UniformInterfaceBlock FEngine::PostProcessingUib::getUib() noexcept {
-    return UibGenerator::getPostProcessingUib();
-}
-
-SamplerInterfaceBlock FEngine::PerViewSib::getSib() noexcept {
-    return SibGenerator::getPerViewSib();
-}
-
-SamplerInterfaceBlock FEngine::PostProcessSib::getSib() noexcept {
-    return SibGenerator::getPostProcessSib();
-}
 
 // these must be static because only a pointer is copied to the render stream
 static const half4 sFullScreenTriangleVertices[3] = {
@@ -154,7 +137,7 @@ FEngine::FEngine(Backend backend, Platform* platform, void* sharedGLContext) :
         mPostProcessSib(PostProcessSib::getSib()),
         mCommandBufferQueue(CONFIG_MIN_COMMAND_BUFFERS_SIZE, CONFIG_COMMAND_BUFFERS_SIZE),
         mPerRenderPassAllocator("per-renderpass allocator", CONFIG_PER_RENDER_PASS_ARENA_SIZE),
-        mEpoch(std::chrono::steady_clock::now()),
+        mEngineEpoch(std::chrono::steady_clock::now()),
         mDriverBarrier(1)
 {
     SYSTRACE_ENABLE();
@@ -176,7 +159,7 @@ void FEngine::init() {
 
     // Parse all post process shaders now, but create them lazily
     mPostProcessParser = std::make_unique<filaflat::MaterialParser>(mBackend,
-            POST_PROCESS_PACKAGE, POST_PROCESS_PACKAGE_SIZE);
+            MATERIALS_POSTPROCESS_DATA, MATERIALS_POSTPROCESS_SIZE);
 
     UTILS_UNUSED_IN_RELEASE bool ppMaterialOk =
             mPostProcessParser->parse() && mPostProcessParser->isPostProcessMaterial();
@@ -235,7 +218,7 @@ void FEngine::init() {
     // Always initialize the default material, most materials' depth shaders fallback on it.
     mDefaultMaterial = upcast(
             FMaterial::DefaultMaterialBuilder()
-                    .package(DEFAULT_MATERIAL_PACKAGE, DEFAULT_MATERIAL_PACKAGE_SIZE)
+                    .package(MATERIALS_DEFAULTMATERIAL_DATA, MATERIALS_DEFAULTMATERIAL_SIZE)
                     .build(*const_cast<FEngine*>(this)));
 }
 
@@ -300,8 +283,8 @@ void FEngine::shutdown() {
     }
     cleanupResourceList(mFences);
 
-    for (size_t i = 0; i < POST_PROCESS_STAGES_COUNT; i++) {
-        driver.destroyProgram(mPostProcessPrograms[i]);
+    for (const auto& mPostProcessProgram : mPostProcessPrograms) {
+        driver.destroyProgram(mPostProcessProgram);
     }
 
     // There might be commands added by the terminate() calls
@@ -387,16 +370,15 @@ int FEngine::loop() {
     JobSystem::setThreadName("FEngine::loop");
     JobSystem::setThreadPriority(JobSystem::Priority::DISPLAY);
 
+    // We use the highest affinity bit, assuming this is a Big core in a  big.little
+    // configuration. This is also a core not used by the JobSystem.
+    // Either way the main reason to do this is to avoid this thread jumping from core to core
+    // and loose its caches in the process.
+    uint32_t id = std::thread::hardware_concurrency() - 1;
+
     while (true) {
-
-        // FIXME: we should do this based on the CPUs we actually have
-        uint32_t affinityMask = (std::thread::hardware_concurrency() >= 6) ? 0xF0 : 0;
-
-        if (affinityMask) {
-            // looks like thread affinity needs to be reset regularly (on Android)
-            JobSystem::setThreadAffinity(affinityMask);
-        }
-
+        // looks like thread affinity needs to be reset regularly (on Android)
+        JobSystem::setThreadAffinityById(id);
         if (!execute()) {
             break;
         }
@@ -425,8 +407,8 @@ const FMaterial* FEngine::getSkyboxMaterial(bool rgbm) const noexcept {
 
 Handle<HwProgram> FEngine::createPostProcessProgram(MaterialParser& parser,
         ShaderModel shaderModel, PostProcessStage stage) const noexcept {
-    ShaderBuilder vShaderBuilder;
-    ShaderBuilder fShaderBuilder;
+    ShaderBuilder& vShaderBuilder = getVertexShaderBuilder();
+    ShaderBuilder& fShaderBuilder = getFragmentShaderBuilder();
     parser.getShader(shaderModel, (uint8_t) stage, ShaderType::VERTEX, vShaderBuilder);
     parser.getShader(shaderModel, (uint8_t) stage, ShaderType::FRAGMENT, fShaderBuilder);
 
@@ -443,11 +425,11 @@ Handle<HwProgram> FEngine::createPostProcessProgram(MaterialParser& parser,
     Program pb;
     pb      .diagnostics(CString("Post Process"))
             .withSamplerBindings(pBindings)
-            .withVertexShader(CString(vShaderBuilder.getShader(), vShaderBuilder.size()))
-            .withFragmentShader(CString(fShaderBuilder.getShader(), fShaderBuilder.size()))
-            .addUniformBlock(BindingPoints::PER_VIEW, &UibGenerator::getPerViewUib())
-            .addUniformBlock(BindingPoints::POST_PROCESS, &UibGenerator::getPostProcessingUib())
-            .addSamplerBlock(BindingPoints::POST_PROCESS, &SibGenerator::getPostProcessSib());
+            .withVertexShader(vShaderBuilder.getShader())
+            .withFragmentShader(fShaderBuilder.getShader())
+            .addUniformBlock(BindingPoints::PER_VIEW, &PerViewUib::getUib())
+            .addUniformBlock(BindingPoints::POST_PROCESS, &PostProcessingUib::getUib())
+            .addSamplerBlock(BindingPoints::POST_PROCESS, &PostProcessSib::getSib());
     auto program = const_cast<DriverApi&>(mCommandStream).createProgram(std::move(pb));
     assert(program);
     return program;
@@ -718,7 +700,7 @@ bool FEngine::execute() {
 
     // wait until we get command buffers to be executed (or thread exit requested)
     auto buffers = mCommandBufferQueue.waitForCommands();
-    if (UTILS_UNLIKELY(!buffers.size())) {
+    if (UTILS_UNLIKELY(buffers.empty())) {
         return false;
     }
 
@@ -732,32 +714,6 @@ bool FEngine::execute() {
 
     return true;
 }
-
-// ---------------------------------------------------------------------------------------------
-
-EnginePerformanceTest::~EnginePerformanceTest() noexcept = default;
-
-class FEnginePerformanceTest : public EnginePerformanceTest {
-public:
-    void activateOmegaThirteen() noexcept { }
-};
-
-FILAMENT_UPCAST(EnginePerformanceTest)
-
-void EnginePerformanceTest::activateOmegaThirteen() noexcept {
-    upcast(this)->activateOmegaThirteen();
-}
-
-void EnginePerformanceTest::activateBigBang() noexcept {
-}
-
-static void destroyUniverse(void *) {
-}
-
-EnginePerformanceTest::PFN EnginePerformanceTest::getDestroyUniverseApi() {
-    return &destroyUniverse;
-}
-
 
 } // namespace details
 

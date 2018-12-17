@@ -915,10 +915,10 @@ $$
 Since the clear coat layer's IOR is fixed, we can combine both steps to simplify:
 
 $$
-f_{0_{base}} = \frac{\left( 1 - 5 \sqrt{\fNormal} \right) ^2}{\left( 5 \sqrt{\fNormal} \right) ^2}
+f_{0_{base}} = \frac{\left( 1 - 5 \sqrt{\fNormal} \right) ^2}{\left( 5 - \sqrt{\fNormal} \right) ^2}
 $$
 
-We should also modify the base layer's apparent roughness based based on the IOR of the clear coat layer but this is something we have opted to leave out for now.
+We should also modify the base layer's apparent roughness based on the IOR of the clear coat layer but this is something we have opted to leave out for now.
 
 ## Anisotropic model
 
@@ -1056,7 +1056,7 @@ Figure [materialCloth] shows how a traditional microfacet BRDF fails to capture 
 
 ![Figure [materialCloth]: Comparison of denim fabric rendered using a traditional microfacet BRDF (left) and our cloth BRDF (right)](images/screenshot_cloth.png)
 
-Velvet is an interesting use case for a cloth material model. As shown in figure [materialVelvet] this type of fabric exhibits strong rim lighting due to forward and backward scattering. These scattering events are caused by fibers standing straight at the surface of the fabric. When the incident light comes from the direction opposite to the view direction, the fibers will forward-scatter the light. Similarly, when the incident light from from the same direction as the view direction, the fibers will scatter the light backward.
+Velvet is an interesting use case for a cloth material model. As shown in figure [materialVelvet] this type of fabric exhibits strong rim lighting due to forward and backward scattering. These scattering events are caused by fibers standing straight at the surface of the fabric. When the incident light comes from the direction opposite to the view direction, the fibers will forward-scatter the light. Similarly, when the incident light from the same direction as the view direction, the fibers will scatter the light backward.
 
 ![Figure [materialVelvet]: Velvet fabric showcasing forward and backward scattering](images/screenshot_cloth_velvet.png)
 
@@ -1927,7 +1927,7 @@ the convolution, such as the increased blur in reflections closer to the viewer
 (a.k.a. stretchy reflections). 
 
 Such a simplification would also have a severe impact on constant environments, such as the white 
-furnace, because it would affect the magnitude of the the constant (i.e. DC) term of the result. We
+furnace, because it would affect the magnitude of the constant (i.e. DC) term of the result. We
 can at least correct for that by using a scale factor, $K$, in our simplified integral, which
 will make sure the average irradiance stay correct when chosen properly.
 
@@ -2932,7 +2932,7 @@ float exposureSettings(float aperture, float shutterSpeed, float sensitivity) {
 // Computes the exposure normalization factor from
 // the camera's EV100
 float exposure(ev100) {
-    return pow(2.0, ev100) * 1.2;
+    return 1.0 / (pow(2.0, ev100) * 1.2);
 }
 
 float ev100 = exposureSettings(aperture, shutterSpeed, sensitivity);
@@ -3402,7 +3402,7 @@ To compute the specular color of a material we need to evaluate the complex Fres
 
 We then sum (integrate) and normalize all the samples to obtain $\fNormal$ in the XYZ color space. From there, a simple color space conversion yields a linear sRGB color or a non-linear sRGB color after applying the opto-electronic transfer function (OETF, commonly known as "gamma" curve). Note that for some materials such as gold the final sRGB color might fall out of gamut. We use a simple normalization step as a cheap form of gamut remapping but it would be interesting to consider computing values in a color space with a wider gamut (for instance BT.2020).
 
-To achieve the desired result we used the ICE 1931 2 degrees CMFs, from 360nm to 830nm at 1nm intervals ([source](http://cvrl.ioo.ucl.ac.uk/cmfs.htm)), and the CIE Standard Illuminant D65 relative spectral power distribution, from 300nm to 830nm, at 5nm intervals ([source](https://cielab.xyz/pdf/CIE_sel_colorimetric_tables.xls)).
+To achieve the desired result we used the ICE 1931 2 degrees CMFs, from 360nm to 830nm at 1nm intervals ([source](http://cvrl.ioo.ucl.ac.uk/cmfs.htm)), and the CIE Standard Illuminant D65 relative spectral power distribution, from 300nm to 830nm, at 5nm intervals ([source](http://files.cie.co.at/204.xls)).
 
 Our implementation is presented in listing [specularColorImpl], with the actual data omitted for brevity.
 

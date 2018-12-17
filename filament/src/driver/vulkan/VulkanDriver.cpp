@@ -16,7 +16,7 @@
 
 #include "driver/vulkan/VulkanDriver.h"
 
-#include "driver/CommandStream.h"
+#include "driver/CommandStreamDispatcher.h"
 
 #include "VulkanBuffer.h"
 #include "VulkanHandles.h"
@@ -25,7 +25,6 @@
 #include <utils/CString.h>
 #include <utils/trap.h>
 
-#include <csignal>
 #include <set>
 
 // Vulkan functions often immediately dereference pointers, so it's fine to pass in a pointer
@@ -53,7 +52,7 @@ VulkanDriver::VulkanDriver(VulkanPlatform* platform,
     // Validation crashes on MoltenVK, so disable it by default on MacOS.
     VkInstanceCreateInfo instanceCreateInfo = {};
 #if !defined(NDEBUG) && !defined(__APPLE__)
-    static const char* DESIRED_LAYERS[] = {
+    static utils::StaticString DESIRED_LAYERS[] = {
     // NOTE: sometimes we see a message: "Cannot activate layer VK_LAYER_GOOGLE_unique_objects
     // prior to activating VK_LAYER_LUNARG_core_validation." despite the fact that it is clearly
     // last in the following list. Should we simply remove unique_objects from the list?
@@ -76,10 +75,10 @@ VulkanDriver::VulkanDriver(VulkanPlatform* platform,
     vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
     std::vector<const char*> enabledLayers;
     for (const VkLayerProperties& layer : availableLayers) {
-        const std::string availableLayer(layer.layerName);
+        const utils::CString availableLayer(layer.layerName);
         for (const auto& desired : DESIRED_LAYERS) {
             if (availableLayer == desired) {
-                enabledLayers.push_back(desired);
+                enabledLayers.push_back(desired.c_str());
             }
         }
     }
@@ -167,7 +166,7 @@ Driver* VulkanDriver::create(VulkanPlatform* const platform,
 }
 
 ShaderModel VulkanDriver::getShaderModel() const noexcept {
-#ifdef ANDROID
+#if defined(ANDROID) || defined(IOS)
     return ShaderModel::GL_ES_30;
 #else
     return ShaderModel::GL_CORE_41;
@@ -194,7 +193,7 @@ void VulkanDriver::terminate() {
     mContext.instance = nullptr;
 }
 
-void VulkanDriver::beginFrame(uint64_t monotonic_clock_ns, uint32_t frameId) {
+void VulkanDriver::beginFrame(int64_t monotonic_clock_ns, uint32_t frameId) {
     // We allow multiple beginFrame / endFrame pairs before commit(), so gracefully return early
     // if the swap chain has already been acquired.
     if (mContext.cmdbuffer) {
@@ -228,7 +227,7 @@ void VulkanDriver::beginFrame(uint64_t monotonic_clock_ns, uint32_t frameId) {
     mBinder.gc();
 }
 
-void VulkanDriver::setPresentationTime(uint64_t monotonic_clock_ns) {
+void VulkanDriver::setPresentationTime(int64_t monotonic_clock_ns) {
 }
 
 void VulkanDriver::endFrame(uint32_t frameId) {
@@ -240,13 +239,14 @@ void VulkanDriver::flush(int) {
 }
 
 void VulkanDriver::createVertexBuffer(Driver::VertexBufferHandle vbh, uint8_t bufferCount,
-        uint8_t attributeCount, uint32_t elementCount, Driver::AttributeArray attributes) {
+        uint8_t attributeCount, uint32_t elementCount, Driver::AttributeArray attributes,
+        Driver::BufferUsage usage) {
     construct_handle<VulkanVertexBuffer>(mHandleMap, vbh, mContext, mStagePool, bufferCount,
             attributeCount, elementCount, attributes);
 }
 
 void VulkanDriver::createIndexBuffer(Driver::IndexBufferHandle ibh, Driver::ElementType elementType,
-        uint32_t indexCount) {
+        uint32_t indexCount, Driver::BufferUsage usage) {
     auto elementSize = (uint8_t) getElementTypeSize(elementType);
     construct_handle<VulkanIndexBuffer>(mHandleMap, ibh, mContext, mStagePool, elementSize,
             indexCount);
@@ -263,8 +263,9 @@ void VulkanDriver::createSamplerBuffer(Driver::SamplerBufferHandle sbh, size_t c
     construct_handle<VulkanSamplerBuffer>(mHandleMap, sbh, mContext, count);
 }
 
-void VulkanDriver::createUniformBuffer(Driver::UniformBufferHandle ubh, size_t size) {
-    construct_handle<VulkanUniformBuffer>(mHandleMap, ubh, mContext, mStagePool, size);
+void VulkanDriver::createUniformBuffer(Driver::UniformBufferHandle ubh, size_t size,
+        Driver::BufferUsage usage) {
+    construct_handle<VulkanUniformBuffer>(mHandleMap, ubh, mContext, mStagePool, size, usage);
 }
 
 void VulkanDriver::createRenderPrimitive(Driver::RenderPrimitiveHandle rph, int) {
@@ -467,6 +468,10 @@ Handle<HwStream> VulkanDriver::createStream(void* nativeStream) {
 void VulkanDriver::setStreamDimensions(Driver::StreamHandle sh, uint32_t width, uint32_t height) {
 }
 
+int64_t VulkanDriver::getStreamTimestamp(Driver::StreamHandle sh) {
+    return 0;
+}
+
 void VulkanDriver::updateStreams(CommandStream* driver) {
 }
 
@@ -505,33 +510,31 @@ bool VulkanDriver::isFrameTimeSupported() {
     return false;
 }
 
-void VulkanDriver::loadVertexBuffer(Driver::VertexBufferHandle vbh, size_t index,
+void VulkanDriver::updateVertexBuffer(Driver::VertexBufferHandle vbh, size_t index,
         BufferDescriptor&& p, uint32_t byteOffset, uint32_t byteSize) {
     auto& vb = *handle_cast<VulkanVertexBuffer>(mHandleMap, vbh);
     vb.buffers[index]->loadFromCpu(p.buffer, byteOffset, byteSize);
     scheduleDestroy(std::move(p));
 }
 
-void VulkanDriver::loadIndexBuffer(Driver::IndexBufferHandle ibh, BufferDescriptor&& p,
+void VulkanDriver::updateIndexBuffer(Driver::IndexBufferHandle ibh, BufferDescriptor&& p,
         uint32_t byteOffset, uint32_t byteSize) {
     auto& ib = *handle_cast<VulkanIndexBuffer>(mHandleMap, ibh);
     ib.buffer->loadFromCpu(p.buffer, byteOffset, byteSize);
     scheduleDestroy(std::move(p));
 }
 
-void VulkanDriver::load2DImage(Driver::TextureHandle th,
+void VulkanDriver::update2DImage(Driver::TextureHandle th,
         uint32_t level, uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
         PixelBufferDescriptor&& data) {
-    assert(data.type != driver::PixelDataType::COMPRESSED && "Compression not yet supported.");
     assert(xoffset == 0 && yoffset == 0 && "Offsets not yet supported.");
-    handle_cast<VulkanTexture>(mHandleMap, th)->load2DImage(data, width, height, level);
+    handle_cast<VulkanTexture>(mHandleMap, th)->update2DImage(data, width, height, level);
     scheduleDestroy(std::move(data));
 }
 
-void VulkanDriver::loadCubeImage(Driver::TextureHandle th, uint32_t level,
+void VulkanDriver::updateCubeImage(Driver::TextureHandle th, uint32_t level,
         PixelBufferDescriptor&& data, FaceOffsets faceOffsets) {
-    assert(data.type != driver::PixelDataType::COMPRESSED && "Compression not yet supported.");
-    handle_cast<VulkanTexture>(mHandleMap, th)->loadCubeImage(data, faceOffsets, level);
+    handle_cast<VulkanTexture>(mHandleMap, th)->updateCubeImage(data, faceOffsets, level);
     scheduleDestroy(std::move(data));
 }
 
@@ -803,14 +806,17 @@ void VulkanDriver::blit(TargetBufferFlags buffers,
         int32_t srcLeft, int32_t srcBottom, uint32_t srcWidth, uint32_t srcHeight) {
 }
 
-void VulkanDriver::draw(Driver::ProgramHandle ph, Driver::RasterState rasterState,
-        Driver::RenderPrimitiveHandle rph) {
+void VulkanDriver::draw(Driver::PipelineState pipelineState, Driver::RenderPrimitiveHandle rph) {
     VkCommandBuffer cmdbuffer = mContext.cmdbuffer;
     ASSERT_POSTCONDITION(cmdbuffer, "Draw calls can occur only within a beginFrame / endFrame.");
     const VulkanRenderPrimitive& prim = *handle_cast<VulkanRenderPrimitive>(mHandleMap, rph);
 
+    Driver::ProgramHandle programHandle = pipelineState.program;
+    Driver::RasterState rasterState = pipelineState.rasterState;
+    Driver::PolygonOffset depthOffset = pipelineState.polygonOffset;
+
     // If this is a debug build, validate the current shader.
-    auto* program = handle_cast<VulkanProgram>(mHandleMap, ph);
+    auto* program = handle_cast<VulkanProgram>(mHandleMap, programHandle);
 #if !defined(NDEBUG)
     if (program->bundle.vertex == VK_NULL_HANDLE || program->bundle.fragment == VK_NULL_HANDLE) {
         utils::slog.e << "Binding missing shader: " << program->name.c_str() << utils::io::endl;
@@ -826,8 +832,9 @@ void VulkanDriver::draw(Driver::ProgramHandle ph, Driver::RasterState rasterStat
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
     };
+
     mContext.rasterState.blending = {
-        .blendEnable = rasterState.hasBlending(),
+        .blendEnable = (VkBool32) rasterState.hasBlending(),
         .srcColorBlendFactor = getBlendFactor(rasterState.blendFunctionSrcRGB),
         .dstColorBlendFactor = getBlendFactor(rasterState.blendFunctionDstRGB),
         .colorBlendOp = (VkBlendOp) rasterState.blendEquationRGB,
@@ -836,6 +843,13 @@ void VulkanDriver::draw(Driver::ProgramHandle ph, Driver::RasterState rasterStat
         .alphaBlendOp =  (VkBlendOp) rasterState.blendEquationAlpha,
         .colorWriteMask = (VkColorComponentFlags) (rasterState.colorWrite ? 0xf : 0x0),
     };
+
+    auto& vkraster = mContext.rasterState.rasterization;
+    vkraster.cullMode = getCullMode(rasterState.culling);
+    vkraster.frontFace = getFrontFace(rasterState.inverseFrontFaces);
+    vkraster.depthBiasEnable = (depthOffset.constant || depthOffset.slope) ? VK_TRUE : VK_FALSE;
+    vkraster.depthBiasConstantFactor = depthOffset.constant;
+    vkraster.depthBiasSlopeFactor = depthOffset.slope;
 
     // Remove the fragment shader from depth-only passes to avoid a validation warning.
     VulkanBinder::ProgramBundle shaderHandles = program->bundle;
@@ -869,6 +883,10 @@ void VulkanDriver::draw(Driver::ProgramHandle ph, Driver::RasterState rasterStat
             if (!sampler->t) {
                 continue;
             }
+
+            // Obtain the global sampler binding index and pass this to VulkanBinder. Note that
+            // "binding" is an offset that is global to the shader, whereas "samplerIndex" is an
+            // offset into the virtual sampler buffer.
             uint8_t binding, group;
             if (program->samplerBindings.getSamplerBinding(bufferIdx, samplerIndex, &binding,
                     &group)) {
@@ -922,15 +940,15 @@ void VulkanDriver::draw(Driver::ProgramHandle ph, Driver::RasterState rasterStat
 void VulkanDriver::debugCommand(const char* methodName) {
     static const std::set<utils::StaticString> OUTSIDE_COMMANDS = {
         "updateUniformBuffer",
-        "loadVertexBuffer",
-        "loadIndexBuffer",
-        "load2DImage",
-        "loadCubeImage",
+        "updateVertexBuffer",
+        "updateIndexBuffer",
+        "update2DImage",
+        "updateCubeImage",
     };
     static const utils::StaticString BEGIN_COMMAND = "beginRenderPass";
     static const utils::StaticString END_COMMAND = "endRenderPass";
     static bool inRenderPass = false;
-    const utils::StaticString command(methodName, strlen(methodName));
+    const utils::StaticString command = utils::StaticString::make(methodName, strlen(methodName));
     if (command == BEGIN_COMMAND) {
         assert(!inRenderPass);
         inRenderPass = true;

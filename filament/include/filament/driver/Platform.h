@@ -44,7 +44,7 @@ public:
     virtual ~Platform() noexcept;
 
 protected:
-    // Creates and and initializes the low-level API (e.g. an OpenGL context or Vulkan instance),
+    // Creates and initializes the low-level API (e.g. an OpenGL context or Vulkan instance),
     // then creates the concrete Driver. Returns null on failure.
     // The caller takes ownership of the returned Driver* and must destroy it with delete.
     virtual Driver* createDriver(void* sharedContext) noexcept = 0;
@@ -66,6 +66,13 @@ public:
     virtual SwapChain* createSwapChain(void* nativeWindow, uint64_t& flags) noexcept = 0;
     virtual void destroySwapChain(SwapChain* swapChain) noexcept = 0;
 
+    virtual void createDefaultRenderTarget(uint32_t& framebuffer, uint32_t& colorbuffer,
+            uint32_t& depthbuffer) noexcept {
+        framebuffer = 0;
+        colorbuffer = 0;
+        depthbuffer = 0;
+    }
+
     // Called to make the OpenGL context active on the calling thread.
     virtual void makeCurrent(SwapChain* drawSwapChain, SwapChain* readSwapChain) noexcept = 0;
 
@@ -73,7 +80,7 @@ public:
     // swap draw buffers (i.e. for double-buffered rendering).
     virtual void commit(SwapChain* swapChain) noexcept = 0;
 
-    virtual void setPresentationTime(long time) noexcept = 0;
+    virtual void setPresentationTime(int64_t presentationTimeInNanosecond) noexcept = 0;
 
     virtual bool canCreateFence() noexcept { return false; }
     virtual Fence* createFence() noexcept = 0;
@@ -90,7 +97,7 @@ public:
 
     // detach destroys the texture associated to the stream
     virtual void detach(Stream* stream) noexcept = 0;
-    virtual void updateTexImage(Stream* stream) noexcept = 0;
+    virtual void updateTexImage(Stream* stream, int64_t* timestamp) noexcept = 0;
 
     // external texture storage
     virtual ExternalTexture* createExternalTextureStorage() noexcept = 0;

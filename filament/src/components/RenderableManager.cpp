@@ -24,6 +24,8 @@
 #include "details/Material.h"
 #include "details/RenderPrimitive.h"
 
+#include <filament/driver/DriverEnums.h>
+
 #include <utils/Log.h>
 #include <utils/Panic.h>
 
@@ -33,22 +35,6 @@ using namespace utils;
 namespace filament {
 
 using namespace details;
-
-struct InternalBone {
-    // Bones are stored as row-major
-    math::float4 verticesTransformRowMajor[3] = {
-            { 1.0f, 0.0f, 0.0f, 0.0f },
-            { 0.0f, 1.0f, 0.0f, 0.0f },
-            { 0.0f, 0.0f, 1.0f, 0.0f }
-    };
-    math::float4 normalsTransformRowMajor[3] = {
-            { 1.0f, 0.0f, 0.0f, 0.0f },
-            { 0.0f, 1.0f, 0.0f, 0.0f },
-            { 0.0f, 0.0f, 1.0f, 0.0f }
-    };
-};
-
-static_assert(CONFIG_MAX_BONE_COUNT * sizeof(InternalBone) <= 16384, "Bones exceed max UBO size");
 
 struct RenderableManager::BuilderDetails {
     using Entry = RenderableManager::Builder::Entry;
@@ -195,7 +181,7 @@ RenderableManager::Builder::Result RenderableManager::Builder::build(Engine& eng
             material = upcast(entry.materialInstance->getMaterial());
         }
 
-        // primitves without indices or vertices will be ignored
+        // primitives without indices or vertices will be ignored
         if (!entry.indices || !entry.vertices) {
             continue;
         }
@@ -269,21 +255,10 @@ void FRenderableManager::create(
     auto& manager = mManager;
     FEngine::DriverApi& driver = engine.getDriverApi();
 
-    // If we already have an instance we can reuse parts of it without completely
-    // destroying it. In particular we can reuse the UBO since it's the same for
-    // all renderables
-    bool canReuse = false;
-    Instance ci = getInstance(entity);
-    if (UTILS_UNLIKELY(ci)) {
-        canReuse = true;
-        destroyComponentPrimitives(engine, manager[ci].primitives);
-        std::unique_ptr<Bones> const& bones = manager[ci].bones;
-        if (bones && !builder->mSkinningBoneCount) {
-            driver.destroyUniformBuffer(bones->handle);
-        }
+    if (UTILS_UNLIKELY(manager.hasComponent(entity))) {
+        destroy(entity);
     }
-
-    ci = manager.addComponent(entity);
+    Instance ci = manager.addComponent(entity);
     assert(ci);
 
     if (ci) {
@@ -302,30 +277,29 @@ void FRenderableManager::create(
         setCastShadows(ci, builder->mCastShadows);
         setReceiveShadows(ci, builder->mReceiveShadows);
         setCulling(ci, builder->mCulling);
-        static_cast<Visibility&>(manager[ci].visibility).skinning = builder->mSkinningBoneCount > 0;
+        setSkinning(ci, false);
 
-        if (!canReuse) {
-            if (builder->mSkinningBoneCount) {
-                std::unique_ptr<Bones>& bones = manager[ci].bones;
-
-                bones.reset(new Bones); // FIXME: maybe use a pool allocator
-                bones->bones = UniformBuffer(CONFIG_MAX_BONE_COUNT * sizeof(InternalBone));
-                bones->handle = driver.createUniformBuffer(CONFIG_MAX_BONE_COUNT * sizeof(InternalBone));
-            }
-        }
-        if (builder->mSkinningBoneCount) {
-            std::unique_ptr<Bones> const& bones = manager[ci].bones;
+        const size_t count = builder->mSkinningBoneCount;
+        if (UTILS_UNLIKELY(count)) {
+            std::unique_ptr<Bones>& bones = manager[ci].bones;
+            bones = std::unique_ptr<Bones>(new Bones{
+                    driver.createUniformBuffer(count * sizeof(PerRenderableUibBone),
+                            driver::BufferUsage::DYNAMIC),
+                    UniformBuffer{ count * sizeof(PerRenderableUibBone) },
+                    count
+            });
             assert(bones);
-            bones->count = (uint8_t)builder->mSkinningBoneCount;
-            if (builder->mUserBones) {
-                setBones(ci, builder->mUserBones, bones->count);
-            } else if (builder->mUserBoneMatrices) {
-                setBones(ci, builder->mUserBoneMatrices, bones->count);
-            } else {
-                // initialize the bones to identity
-                InternalBone* UTILS_RESTRICT out =
-                        (InternalBone*)bones->bones.invalidateUniforms(0, bones->count * sizeof(InternalBone));
-                std::uninitialized_fill_n(out, bones->count, InternalBone{});
+            if (bones) {
+                setSkinning(ci, true);
+                if (builder->mUserBones) {
+                    setBones(ci, builder->mUserBones, count);
+                } else if (builder->mUserBoneMatrices) {
+                    setBones(ci, builder->mUserBoneMatrices, count);
+                } else {
+                    // initialize the bones to identity
+                    PerRenderableUibBone* out = (PerRenderableUibBone*)bones->bones.invalidate();
+                    std::uninitialized_fill_n(out, count, PerRenderableUibBone{});
+                }
             }
         }
     }
@@ -483,25 +457,13 @@ void FRenderableManager::setBones(Instance ci,
         assert(bones && offset + boneCount <= bones->count);
         if (bones) {
             boneCount = std::min(boneCount, bones->count - offset);
-            InternalBone* UTILS_RESTRICT out = (InternalBone*)bones->bones.invalidateUniforms(
-                    offset * sizeof(InternalBone),
-                    boneCount * sizeof(InternalBone));
+            PerRenderableUibBone* UTILS_RESTRICT out = (PerRenderableUibBone*)bones->bones.invalidateUniforms(
+                    offset * sizeof(PerRenderableUibBone),
+                    boneCount * sizeof(PerRenderableUibBone));
             for (size_t i = 0, c = bones->count; i < c; ++i) {
-                mat4f t(transforms[i].unitQuaternion);
-                t[3].xyz = transforms[i].translation;
-
-                const mat4f m = transpose(t); // row-major
-                out[i].verticesTransformRowMajor[0] = m[0];
-                out[i].verticesTransformRowMajor[1] = m[1];
-                out[i].verticesTransformRowMajor[2] = m[2];
-
-                // for transforming normals, we can ignore the translation, and we need
-                // to take the transpose(inverse()). However, we know we're dealing with
-                // a rigid transform, so the inverse is the transpose and they cancel out.
-                // Then, we take the transpose() for row-major encoding.
-                out[i].normalsTransformRowMajor[0] = m[0];
-                out[i].normalsTransformRowMajor[1] = m[1];
-                out[i].normalsTransformRowMajor[2] = m[2];
+                out[i].q = transforms[i].unitQuaternion;
+                out[i].t.xyz = transforms[i].translation;
+                out[i].s = out[i].ns = { 1, 1, 1, 0 };
             }
         }
     }
@@ -514,25 +476,37 @@ void FRenderableManager::setBones(Instance ci,
         assert(bones && offset + boneCount <= bones->count);
         if (bones) {
             boneCount = std::min(boneCount, bones->count - offset);
-            InternalBone* UTILS_RESTRICT out = (InternalBone*)bones->bones.invalidateUniforms(
-                    offset * sizeof(InternalBone),
-                    boneCount * sizeof(InternalBone));
+            PerRenderableUibBone* UTILS_RESTRICT out = (PerRenderableUibBone*)bones->bones.invalidateUniforms(
+                    offset * sizeof(PerRenderableUibBone),
+                    boneCount * sizeof(PerRenderableUibBone));
             for (size_t i = 0, c = bones->count; i < c; ++i) {
-                const mat4f m = transpose(transforms[i]); // row-major
-                out[i].verticesTransformRowMajor[0] = m[0];
-                out[i].verticesTransformRowMajor[1] = m[1];
-                out[i].verticesTransformRowMajor[2] = m[2];
-
-                // for transforming normals, we can ignore the translation, and we need
-                // to take the transpose(inverse()).
-                // then take the transpose() for row-major encoding.
-                const mat3f n = inverse(transforms[i].upperLeft());
-                out[i].normalsTransformRowMajor[0].xyz = n[0];
-                out[i].normalsTransformRowMajor[1].xyz = n[1];
-                out[i].normalsTransformRowMajor[2].xyz = n[2];
+                makeBone(&out[i], transforms[i]);
             }
         }
     }
+}
+
+void FRenderableManager::makeBone(PerRenderableUibBone* UTILS_RESTRICT out, math::mat4f const& t) noexcept {
+    mat4f m(t);
+
+    // figure out the scales
+    float4 s = { length(m[0]), length(m[1]), length(m[2]), 0.0f };
+    if (dot(cross(m[0].xyz, m[1].xyz), m[2].xyz) < 0) {
+        s[2] = -s[2];
+    }
+
+    // compute the inverse scales
+    float4 is = { 1.0f/s.x, 1.0f/s.y, 1.0f/s.z, 0.0f };
+
+    // normalize the matrix
+    m[0] *= is[0];
+    m[1] *= is[1];
+    m[2] *= is[2];
+
+    out->s = s;
+    out->q = m.toQuaternion();
+    out->t = m[3];
+    out->ns = is / max(abs(is));
 }
 
 } // namespace details

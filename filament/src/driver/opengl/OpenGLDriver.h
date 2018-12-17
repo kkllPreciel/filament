@@ -50,6 +50,14 @@ public:
     static Driver* create(driver::OpenGLPlatform* platform, void* sharedGLContext) noexcept;
 
     // OpenGLDriver specific fields
+    struct GLBuffer {
+        GLuint id = 0;
+        uint32_t capacity = 0;
+        uint32_t base = 0;
+        uint32_t size = 0;
+        driver::BufferUsage usage = {};
+    };
+
     struct GLVertexBuffer : public HwVertexBuffer {
         using HwVertexBuffer::HwVertexBuffer;
         struct {
@@ -61,6 +69,22 @@ public:
         using HwIndexBuffer::HwIndexBuffer;
         struct {
             GLuint buffer;
+        } gl;
+    };
+
+    struct GLUniformBuffer : public HwUniformBuffer {
+        GLUniformBuffer(uint32_t capacity, driver::BufferUsage usage) noexcept {
+            gl.ubo.capacity = capacity;
+            gl.ubo.usage = usage;
+        }
+        struct {
+            GLBuffer ubo;
+        } gl;
+    };
+
+    struct GLSamplerBuffer : public HwSamplerBuffer {
+        using HwSamplerBuffer::HwSamplerBuffer;
+        struct {
         } gl;
     };
 
@@ -122,10 +146,8 @@ public:
              * This is for making a cpu copy of the camera frame
              */
             GLuint externalTexture2DId = 0;
-            GLuint width = 0;
-            GLuint height = 0;
             GLuint fbo = 0;
-        } gl;
+        } gl;   // 20 bytes
 
         /*
          * The fields below are access from the main application thread
@@ -133,28 +155,17 @@ public:
          */
         struct {
             // texture id used to texture from, always used in the GL thread
-            GLuint read[ROUND_ROBIN_TEXTURE_COUNT];
+            GLuint read[ROUND_ROBIN_TEXTURE_COUNT];     // 12 bytes
             // texture id to write into, always used from the user thread
-            GLuint write[ROUND_ROBIN_TEXTURE_COUNT];
-            Info infos[ROUND_ROBIN_TEXTURE_COUNT];
+            GLuint write[ROUND_ROBIN_TEXTURE_COUNT];    // 12 bytes
+            Info infos[ROUND_ROBIN_TEXTURE_COUNT];      // 48 bytes
+            int64_t timestamp = 0;
             uint8_t cur = 0;
         } user_thread;
     };
 
-    struct GLSamplerBuffer : public HwSamplerBuffer {
-        using HwSamplerBuffer::HwSamplerBuffer;
-        struct {
-        } gl;
-    };
-
-    struct GLUniformBuffer : public HwUniformBuffer {
-        using HwUniformBuffer::HwUniformBuffer;
-        struct {
-            GLuint ubo = 0;
-        } gl;
-    };
-
     struct GLRenderTarget : public HwRenderTarget {
+        using HwRenderTarget::HwRenderTarget;
         struct GL {
             struct RenderBuffer {
                 union {
@@ -264,9 +275,11 @@ private:
     using GetProcAddressType = MustCastToRightType (*)(const char* name);
     GetProcAddressType getProcAddress = nullptr;
 
-    static bool hasExtension(std::set<utils::StaticString> const& exts, const char* ext) noexcept;
-    void initExtensionsGLES(GLint major, GLint minor, std::set<utils::StaticString> const& extensionsMap);
-    void initExtensionsGL(GLint major, GLint minor, std::set<utils::StaticString> const& extensionsMap);
+    // this is chosen to minimize code size
+    using ExtentionSet = std::set<utils::StaticString>;
+    static bool hasExtension(ExtentionSet const& exts, utils::StaticString ext) noexcept;
+    void initExtensionsGLES(GLint major, GLint minor, ExtentionSet const& extensionsMap);
+    void initExtensionsGL(GLint major, GLint minor, ExtentionSet const& extensionsMap);
 
 
     /* Misc... */
@@ -285,6 +298,7 @@ private:
             setRasterStateSlow(rs);
         }
     }
+
     void setTextureData(GLTexture* t,
             uint32_t level,
             uint32_t xoffset, uint32_t yoffset, uint32_t zoffset,
@@ -333,12 +347,14 @@ private:
     inline void disableVertexAttribArray(GLuint index) noexcept;
     inline void enable(GLenum cap) noexcept;
     inline void disable(GLenum cap) noexcept;
+    inline void frontFace(GLenum mode) noexcept;
     inline void cullFace(GLenum mode) noexcept;
     inline void blendEquation(GLenum modeRGB, GLenum modeA) noexcept;
     inline void blendFunction(GLenum srcRGB, GLenum srcA, GLenum dstRGB, GLenum dstA) noexcept;
     inline void colorMask(GLboolean flag) noexcept;
     inline void depthMask(GLboolean flag) noexcept;
     inline void depthFunc(GLenum func) noexcept;
+    inline void polygonOffset(GLfloat factor, GLfloat units) noexcept;
 
     inline void setScissor(GLint left, GLint bottom, GLsizei width, GLsizei height) noexcept;
     inline void setViewport(GLint left, GLint bottom, GLsizei width, GLsizei height) noexcept;
@@ -368,7 +384,6 @@ private:
     static constexpr const size_t MAX_BUFFER_BINDINGS = 32;
 
     GLRenderPrimitive mDefaultVAO;
-    GLint mMaxRenderBufferSize = 0;
 
     template <typename T, typename F>
     inline void update_state(T& state, T const& expected, F functor, bool force = false) noexcept {
@@ -392,6 +407,7 @@ private:
         } vao;
 
         struct {
+            GLenum frontFace            = GL_CCW;
             GLenum cullFace             = GL_BACK;
             GLenum blendEquationRGB     = GL_FUNC_ADD;
             GLenum blendEquationA       = GL_FUNC_ADD;
@@ -403,6 +419,14 @@ private:
             GLboolean depthMask         = GL_TRUE;
             GLenum depthFunc            = GL_LESS;
         } raster;
+
+        struct PolygonOffset {
+            GLfloat factor = 0;
+            GLfloat units = 0;
+            bool operator != (PolygonOffset const& rhs) noexcept {
+                return factor != rhs.factor || units != rhs.units;
+            }
+        } polygonOffset;
 
         struct {
             utils::bitset32 caps;
@@ -490,6 +514,13 @@ private:
     mutable tsl::robin_map<uint32_t, GLuint> mSamplerMap;
     mutable std::vector<GLTexture*> mExternalStreams;
 
+    // glGet*() values
+    struct {
+        GLint max_renderbuffer_size = 0;
+        GLint max_uniform_block_size = 0;
+        GLint uniform_buffer_offset_alignment = 256;
+    } gets;
+
     // features supported by this version of GL or GLES
     struct {
         bool multisample_texture = false;
@@ -540,6 +571,7 @@ private:
 
     OpenGLBlitter* mOpenGLBlitter = nullptr;
     void updateStream(GLTexture* t, driver::DriverApi* driver) noexcept;
+    void updateBuffer(GLenum target, GLBuffer* buffer, BufferDescriptor const& p, uint32_t alignment = 16) noexcept;
 };
 
 // ------------------------------------------------------------------------------------------------

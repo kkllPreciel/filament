@@ -27,10 +27,15 @@
 #include <filament/Box.h>
 #include <filament/RenderableManager.h>
 
+#include <private/filament/UibGenerator.h>
+
 #include <utils/Entity.h>
 #include <utils/SingleInstanceComponentManager.h>
 #include <utils/Slice.h>
 #include <utils/Range.h>
+
+// for gtest
+class FilamentTest_Bones_Test;
 
 namespace filament {
 namespace details {
@@ -94,6 +99,7 @@ public:
     inline void setLayerMask(Instance instance, uint8_t layerMask) noexcept;
     inline void setReceiveShadows(Instance instance, bool enable) noexcept;
     inline void setCulling(Instance instance, bool enable) noexcept;
+    inline void setSkinning(Instance instance, bool enable) noexcept;
     inline void setPrimitives(Instance instance, utils::Slice<FRenderPrimitive> const& primitives) noexcept;
     inline void setBones(Instance instance, Bone const* transforms, size_t boneCount, size_t offset = 0) noexcept;
     inline void setBones(Instance instance, math::mat4f const* transforms, size_t boneCount, size_t offset = 0) noexcept;
@@ -127,15 +133,6 @@ public:
     inline utils::Slice<FRenderPrimitive> const& getRenderPrimitives(Instance instance, uint8_t level) const noexcept;
     inline utils::Slice<FRenderPrimitive>& getRenderPrimitives(Instance instance, uint8_t level) noexcept;
 
-    // this must have an alignment of 256 to be compatible with all versions of GLES
-    // (we're wasting 156 bytes right now)
-    struct alignas(256) Transform {
-        math::mat4f worldFromModelMatrix;
-        math::mat3f worldFromModelNormalMatrix;
-    };
-    static_assert(sizeof(Transform) % 256 == 0, "sizeof(Transform) should be a multiple of 256");
-
-
 private:
     void destroyComponent(Instance ci) noexcept;
     static void destroyComponentPrimitives(FEngine& engine,
@@ -144,8 +141,12 @@ private:
     struct Bones {
         filament::Handle<HwUniformBuffer> handle;
         UniformBuffer bones;
-        uint8_t count;
+        size_t count;
     };
+
+    friend class ::FilamentTest_Bones_Test;
+
+    static void makeBone(PerRenderableUibBone* out, math::mat4f const& transforms) noexcept;
 
     enum {
         AABB,               // user data
@@ -175,11 +176,11 @@ private:
 
             union {
                 // this specific usage of union is permitted. All fields are identical
-                Field<AABB>                 aabb;
-                Field<LAYERS>               layers;
-                Field<VISIBILITY>           visibility;
-                Field<PRIMITIVES>           primitives;
-                Field<BONES>                bones;
+                Field<AABB>         aabb;
+                Field<LAYERS>       layers;
+                Field<VISIBILITY>   visibility;
+                Field<PRIMITIVES>   primitives;
+                Field<BONES>        bones;
             };
         };
 
@@ -242,6 +243,13 @@ void FRenderableManager::setCulling(Instance instance, bool enable) noexcept {
     if (instance) {
         Visibility& visibility = mManager[instance].visibility;
         visibility.culling = enable;
+    }
+}
+
+void FRenderableManager::setSkinning(Instance instance, bool enable) noexcept {
+    if (instance) {
+        Visibility& visibility = mManager[instance].visibility;
+        visibility.skinning = enable;
     }
 }
 

@@ -61,7 +61,6 @@ public:
     using PrimitiveType = driver::PrimitiveType;
     using UniformType = driver::UniformType;
     using ElementType = driver::ElementType;
-    using Usage = driver::Usage;
     using TextureFormat = driver::TextureFormat;
     using TextureUsage = driver::TextureUsage;
     using TextureCubemapFace = driver::TextureCubemapFace;
@@ -81,6 +80,7 @@ public:
     using FenceStatus = driver::FenceStatus;
     using TargetBufferFlags = driver::TargetBufferFlags;
     using RenderPassParams = driver::RenderPassParams;
+    using BufferUsage = driver::BufferUsage;
 
     static constexpr uint64_t FENCE_WAIT_FOR_EVER = driver::FENCE_WAIT_FOR_EVER;
 
@@ -198,10 +198,22 @@ public:
                 DepthFunc depthFunc                 : 3;        // 28
                 bool colorWrite                     : 1;        // 29
                 bool alphaToCoverage                : 1;        // 30
-                uint8_t padding                     : 2;        // 32
+                bool inverseFrontFaces              : 1;        // 31
+                uint8_t padding                     : 1;        // 32
             };
             uint32_t u = 0;
         };
+    };
+
+    struct PolygonOffset {
+        float slope = 0;        // factor in GL-speak
+        float constant = 0;     // units in GL-speak
+    };
+
+    struct PipelineState {
+        ProgramHandle program;
+        RasterState rasterState;
+        PolygonOffset polygonOffset;
     };
 
     static SamplerFormat getSamplerFormat(TextureFormat format) noexcept;
@@ -209,7 +221,8 @@ public:
     static size_t getElementTypeSize(ElementType type) noexcept;
 
     // This is here to be compatible with CommandStream (nice for debugging)
-    inline void queueCommand(const std::function<void()>& command) {
+    template<typename CALLABLE>
+    inline void queueCommand(CALLABLE command) {
         command();
     }
 
@@ -261,11 +274,13 @@ utils::io::ostream& operator<<(utils::io::ostream& out, const filament::Driver::
 utils::io::ostream& operator<<(utils::io::ostream& out, const filament::Driver::FaceOffsets& type);
 utils::io::ostream& operator<<(utils::io::ostream& out, const filament::Driver::RasterState& rs);
 utils::io::ostream& operator<<(utils::io::ostream& out, const filament::Driver::TargetBufferInfo& tbi);
+utils::io::ostream& operator<<(utils::io::ostream& out, const filament::Driver::PolygonOffset& po);
+utils::io::ostream& operator<<(utils::io::ostream& out, const filament::Driver::PipelineState& ps);
 
 utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::ShaderModel model);
 utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::PrimitiveType type);
 utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::ElementType type);
-utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::Usage usage);
+utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::BufferUsage usage);
 utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::CullingMode mode);
 utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::SamplerType type);
 utils::io::ostream& operator<<(utils::io::ostream& out, filament::driver::SamplerFormat format);

@@ -76,6 +76,7 @@ public:
     using CubemapFace = driver::TextureCubemapFace;                 //!< Cube map faces
     using Format = driver::PixelDataFormat;                         //!< Pixel color format
     using Type = driver::PixelDataType;                             //!< Pixel data format
+    using CompressedType = driver::CompressedPixelDataType;         //!< Compressed pixel data format
     using FaceOffsets = driver::FaceOffsets;                        //!< Cube map faces offsets
     using Usage = driver::TextureUsage;                             //!< Usage affects texel layout
 
@@ -175,9 +176,9 @@ public:
          * @param engine Reference to the filament::Engine to associate this Texture with.
          *
          * @return pointer to the newly created object or nullptr if exceptions are disabled and
-         *         an error occured.
+         *         an error occurred.
          *
-         * @exception utils::PostConditionPanic if a runtime error occured, such as running out of
+         * @exception utils::PostConditionPanic if a runtime error occurred, such as running out of
          *            memory or other resources.
          * @exception utils::PreConditionPanic if a parameter to a builder function was invalid.
          */
