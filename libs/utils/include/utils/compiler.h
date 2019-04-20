@@ -36,6 +36,14 @@
 #    define UTILS_PUBLIC  
 #endif
 
+#if __has_attribute(packed)
+#   define UTILS_PACKED __attribute__((packed))
+#else
+// If this happens, we may need to use "#pragma pack(push, 1)" instead.
+#   error Compiler does not support the packed attribute.
+#   define UTILS_PACKED
+#endif
+
 #if __has_attribute(visibility)
 #    ifndef TNT_DEV
 #        define UTILS_PRIVATE __attribute__((visibility("hidden")))
@@ -115,7 +123,13 @@
 #define UTILS_UNUSED_IN_RELEASE
 #endif
 
-#define UTILS_RESTRICT __restrict__
+#if defined(_MSC_VER) && _MSC_VER >= 1900
+#    define UTILS_RESTRICT __restrict
+#elif (defined(__clang__) || defined(__GNUC__))
+#    define UTILS_RESTRICT __restrict__
+#else
+#    define UTILS_RESTRICT
+#endif
 
 #if __has_feature(cxx_thread_local)
 #   ifdef ANDROID

@@ -24,7 +24,7 @@
 #include <filament/Viewport.h>
 #include <filament/FilamentAPI.h>
 
-#include <filament/driver/DriverEnums.h>
+#include <backend/DriverEnums.h>
 
 #include <utils/compiler.h>
 
@@ -60,7 +60,7 @@ class Scene;
  */
 class UTILS_PUBLIC View : public FilamentAPI {
 public:
-    using TargetBufferFlags = driver::TargetBufferFlags;
+    using TargetBufferFlags = backend::TargetBufferFlags;
 
     /**
      * Dynamic resolution can be used to either reach a desired target frame rate
@@ -132,6 +132,8 @@ public:
      *              using an R11G11B10F opaque color buffer or an RGBA16F transparent color
      *              buffer. With R11G11B10F colors in the LDR range have a precision of either
      *              6 bits (red and green channels) or 5 bits (blue channel).
+     *
+     * @see setRenderQuality, getAntiAliasing
      */
     struct RenderQuality {
         QualityLevel hdrColorBuffer = QualityLevel::HIGH; //!< quality of the color buffer
@@ -139,16 +141,34 @@ public:
 
     /**
      * List of available post-processing anti-aliasing techniques.
+     * @see setAntiAliasing, getAntiAliasing
      */
-    enum AntiAliasing : uint8_t {
-        NONE = 0,
-        FXAA = 1
+    enum class AntiAliasing : uint8_t {
+        NONE = 0,   //!< no anti aliasing performed as part of post-processing
+        FXAA = 1    //!< FXAA is a low-quality but very efficient type of anti-aliasing. (default).
     };
 
+    /** @see setDepthPrepass */
     enum class DepthPrepass : int8_t {
         DEFAULT = -1,
         DISABLED,
         ENABLED,
+    };
+
+    /**
+     * List of available post-processing dithering techniques.
+     */
+    enum class Dithering : uint8_t {
+        NONE = 0,       //!< No dithering
+        TEMPORAL = 1    //!< Temporal dithering (default)
+    };
+
+    /**
+     * List of available tone-mapping operators
+     */
+    enum class ToneMapping : uint8_t {
+        LINEAR = 0,     //!< Linear tone mapping (i.e. no tone mapping)
+        ACES = 1,       //!< ACES tone mapping
     };
 
     /**
@@ -340,7 +360,8 @@ public:
     void setRenderTarget(TargetBufferFlags discard = TargetBufferFlags::ALL) noexcept;
 
     /**
-     * Sets how many samples are to be used for MSAA. Default is 1 and disables MSAA.
+     * Sets how many samples are to be used for MSAA in the post-process stage.
+     * Default is 1 and disables MSAA.
      *
      * @param count number of samples to use for multi-sampled anti-aliasing.\n
      *              0: treated as 1
@@ -348,6 +369,10 @@ public:
      *              n: sample count. Effective sample could be different depending on the
      *                 GPU capabilities.
      *
+     * @note Anti-aliasing can also be performed in the post-processing stage, generally at lower
+     *       cost. See setAntialiasing.
+     *
+     * @see setAntialiasing
      */
     void setSampleCount(uint8_t count = 1) noexcept;
 
@@ -364,6 +389,10 @@ public:
      * MSAA can be enabled in addition, see setSampleCount().
      *
      * @param type FXAA for enabling, NONE for disabling anti-aliasing.
+     *
+     * @note For MSAA anti-aliasing, see setSamplerCount().
+     *
+     * @see setSampleCount
      */
     void setAntiAliasing(AntiAliasing type) noexcept;
 
@@ -374,6 +403,33 @@ public:
      * @return The post-processing anti-aliasing method.
      */
     AntiAliasing getAntiAliasing() const noexcept;
+
+    /**
+     * Enables or disables tone-mapping in the post-processing stage. Enabled by default.
+     *
+     * @param type Tone-mapping function.
+     */
+    void setToneMapping(ToneMapping type) noexcept;
+
+    /**
+     * Returns the tone-mapping function.
+     * @return tone-mapping function.
+     */
+    ToneMapping getToneMapping() const noexcept;
+
+    /**
+     * Enables or disables dithering in the post-processing stage. Enabled by default.
+     *
+     * @param dithering dithering type
+     */
+    void setDithering(Dithering dithering) noexcept;
+
+    /**
+     * Queries whether dithering is enabled during the post-processing stage.
+     *
+     * @return the current dithering type for this view.
+     */
+    Dithering getDithering() const noexcept;
 
     /**
      * Sets the dynamic resolution options for this view. Dynamic resolution options
@@ -429,15 +485,18 @@ public:
      * Enable or disable post processing. Enabled by default.
      *
      * Post-processing includes:
-     *  - MSAA
      *  - Tone-mapping & gamma encoding
+     *  - Dithering
+     *  - MSAA
      *  - FXAA
      *  - Dynamic scaling
      *
-     * For now, disabling post-processing forgoes color correctness as well as anti-aliasing and
+     * Disabling post-processing forgoes color correctness as well as anti-aliasing and
      * should only be used experimentally (e.g., for UI overlays).
      *
      * @param enabled true enables post processing, false disables it.
+     *
+     * @see setToneMapping, setAntiAliasing, setDithering, setSampleCount
      */
     void setPostProcessingEnabled(bool enabled) noexcept;
 

@@ -20,17 +20,22 @@
 
 #include "RenderPass.h"
 
+#include <private/filament/UniformInterfaceBlock.h>
+
 #include "details/Engine.h"
 #include "details/Material.h"
 #include "details/Texture.h"
 
+#include <utils/Log.h>
+
 #include <string.h>
 
-using namespace math;
+using namespace filament::math;
+using namespace utils;
 
 namespace filament {
 
-using namespace driver;
+using namespace backend;
 
 namespace details {
 
@@ -43,20 +48,23 @@ FMaterialInstance::FMaterialInstance(FEngine& engine, FMaterial const* material)
             material->getId(), material->generateMaterialInstanceId());
 
     if (!material->getUniformInterfaceBlock().isEmpty()) {
-        const UniformBuffer& defaultUniforms = upcast(material)->getDefaultInstance()->mUniforms;
-        mUniforms = UniformBuffer(upcast(material)->getUniformInterfaceBlock());
-        ::memcpy(const_cast<void*>(mUniforms.getBuffer()), defaultUniforms.getBuffer(), mUniforms.getSize());
-        mUbHandle = driver.createUniformBuffer(mUniforms.getSize(), driver::BufferUsage::DYNAMIC);
+        mUniforms.setUniforms(material->getDefaultInstance()->getUniformBuffer());
+        mUbHandle = driver.createUniformBuffer(mUniforms.getSize(), backend::BufferUsage::DYNAMIC);
     }
 
     if (!material->getSamplerInterfaceBlock().isEmpty()) {
-        mSamplers = SamplerBuffer(material->getDefaultInstance()->getSamplerBuffer());
-        mSbHandle = driver.createSamplerBuffer(mSamplers.getSize());
+        mSamplers.setSamplers(material->getDefaultInstance()->getSamplerGroup());
+        mSbHandle = driver.createSamplerGroup(mSamplers.getSize());
     }
 
     if (material->getBlendingMode() == BlendingMode::MASKED) {
         static_cast<MaterialInstance*>(this)->setParameter(
-                "maskThreshold", material->getMaskThreshold());
+                "_maskThreshold", material->getMaskThreshold());
+    }
+
+    if (material->hasDoubleSidedCapability()) {
+        static_cast<MaterialInstance*>(this)->setParameter(
+                "_doubleSided", material->isDoubleSided());
     }
 }
 
@@ -68,18 +76,23 @@ void FMaterialInstance::initDefaultInstance(FEngine& engine, FMaterial const* ma
             material->getId(), material->generateMaterialInstanceId());
 
     if (!material->getUniformInterfaceBlock().isEmpty()) {
-        mUniforms = UniformBuffer(material->getUniformInterfaceBlock());
-        mUbHandle = driver.createUniformBuffer(mUniforms.getSize(), driver::BufferUsage::STATIC);
+        mUniforms = UniformBuffer(material->getUniformInterfaceBlock().getSize());
+        mUbHandle = driver.createUniformBuffer(mUniforms.getSize(), backend::BufferUsage::STATIC);
     }
 
     if (!material->getSamplerInterfaceBlock().isEmpty()) {
-        mSamplers = SamplerBuffer(material->getSamplerInterfaceBlock());
-        mSbHandle = driver.createSamplerBuffer(mSamplers.getSize());
+        mSamplers = SamplerGroup(material->getSamplerInterfaceBlock().getSize());
+        mSbHandle = driver.createSamplerGroup(mSamplers.getSize());
     }
 
     if (material->getBlendingMode() == BlendingMode::MASKED) {
         static_cast<MaterialInstance*>(this)->setParameter(
-                "maskThreshold", material->getMaskThreshold());
+                "_maskThreshold", material->getMaskThreshold());
+    }
+
+    if (material->hasDoubleSidedCapability()) {
+        static_cast<MaterialInstance*>(this)->setParameter(
+                "_doubleSided", material->isDoubleSided());
     }
 }
 
@@ -88,25 +101,27 @@ FMaterialInstance::~FMaterialInstance() noexcept = default;
 void FMaterialInstance::terminate(FEngine& engine) {
     FEngine::DriverApi& driver = engine.getDriverApi();
     driver.destroyUniformBuffer(mUbHandle);
-    driver.destroySamplerBuffer(mSbHandle);
+    driver.destroySamplerGroup(mSbHandle);
 }
 
 void FMaterialInstance::commitSlow(FEngine& engine) const {
     // update uniforms if needed
     FEngine::DriverApi& driver = engine.getDriverApi();
     if (mUniforms.isDirty()) {
-        driver.updateUniformBuffer(mUbHandle, mUniforms.toBufferDescriptor(driver));
-        mUniforms.clean();
+        driver.loadUniformBuffer(mUbHandle, mUniforms.toBufferDescriptor(driver));
     }
     if (mSamplers.isDirty()) {
-        driver.updateSamplerBuffer(mSbHandle, SamplerBuffer(mSamplers));
-        mSamplers.clean();
+        driver.updateSamplerGroup(mSbHandle, std::move(mSamplers.toCommandStream()));
     }
 }
 
-template <typename T>
+template<typename T>
 inline void FMaterialInstance::setParameter(const char* name, T value) noexcept {
-    mUniforms.setUniform<T>(mMaterial->getUniformInterfaceBlock(), name, 0, value);
+    auto const& uib = mMaterial->getUniformInterfaceBlock();
+    ssize_t offset = uib.getUniformOffset(name, 0);
+    if (offset >= 0) {
+        mUniforms.setUniform<T>(size_t(offset), value);  // handles specialization for mat3f
+    }
 }
 
 template <typename T>
@@ -119,8 +134,16 @@ inline void FMaterialInstance::setParameter(const char* name, const T* value, si
 
 void FMaterialInstance::setParameter(const char* name,
         Texture const* texture, TextureSampler const& sampler) noexcept {
-    mSamplers.setSampler(mMaterial->getSamplerInterfaceBlock(), name, 0,
-            { upcast(texture)->getHwHandle(), sampler.getSamplerParams() });
+    size_t index = mMaterial->getSamplerInterfaceBlock().getSamplerInfo(name)->offset;
+    mSamplers.setSampler(index, { upcast(texture)->getHwHandle(), sampler.getSamplerParams() });
+}
+
+void FMaterialInstance::setDoubleSided(bool doubleSided) noexcept {
+    if (!mMaterial->hasDoubleSidedCapability()) {
+        slog.w << "Parent material does not have double-sided capability." << io::endl;
+        return;
+    }
+    setParameter("_doubleSided", doubleSided);
 }
 
 } // namespace details
@@ -205,6 +228,14 @@ void MaterialInstance::unsetScissor() noexcept {
 
 void MaterialInstance::setPolygonOffset(float scale, float constant) noexcept {
     upcast(this)->setPolygonOffset(scale, constant);
+}
+
+void MaterialInstance::setMaskThreshold(float threshold) noexcept {
+    upcast(this)->setMaskThreshold(threshold);
+}
+
+void MaterialInstance::setDoubleSided(bool doubleSided) noexcept {
+    upcast(this)->setDoubleSided(doubleSided);
 }
 
 } // namespace filament

@@ -65,6 +65,7 @@ macro(spirv_cross_add_library name config_name)
   target_compile_options(${name} PRIVATE ${spirv-compiler-options})
   target_compile_definitions(${name} PRIVATE ${spirv-compiler-defines})
   target_compile_definitions(${name} PUBLIC ${spirv-compiler-public-defines})
+  target_compile_options(${name} PRIVATE $<$<PLATFORM_ID:Linux>:-fPIC>)
 endmacro()
 
 spirv_cross_add_library(spirv-cross-core spirv_cross_core STATIC
@@ -80,4 +81,8 @@ spirv_cross_add_library(spirv-cross-glsl spirv_cross_glsl STATIC
     ../spirv_glsl.cpp
     ../spirv_glsl.hpp)
 
-target_link_libraries(spirv-cross-glsl spirv-cross-core)
+spirv_cross_add_library(spirv-cross-msl spirv_cross_msl STATIC
+    ../spirv_msl.cpp
+    ../spirv_msl.hpp)
+
+target_link_libraries(spirv-cross-glsl spirv-cross-msl spirv-cross-core)

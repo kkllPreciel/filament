@@ -18,6 +18,8 @@
 
 #include <filamat/Package.h>
 
+#include <private/filament/SibGenerator.h>
+
 #include "shaders/ShaderGenerator.h"
 
 #include "GLSLPostProcessor.h"
@@ -32,12 +34,11 @@
 
 #include <vector>
 
-using namespace filament::driver;
+using namespace filament::backend;
 
 namespace filamat {
 
 Package PostprocessMaterialBuilder::build() {
-    GLSLTools::init();
     prepare();
 
     // Create a postprocessor to optimize / compile to Spir-V if necessary.
@@ -46,46 +47,59 @@ Package PostprocessMaterialBuilder::build() {
     // Create chunk tree.
     ChunkContainer container;
 
-    SimpleFieldChunk<uint32_t> version(ChunkType::PostProcessVersion, 1);
+    SimpleFieldChunk<uint32_t> version(ChunkType::PostProcessVersion, filament::MATERIAL_VERSION);
     container.addChild(&version);
 
     std::vector<TextEntry> glslEntries;
     std::vector<SpirvEntry> spirvEntries;
+    std::vector<TextEntry> metalEntries;
     LineDictionary glslDictionary;
     BlobDictionary spirvDictionary;
+    LineDictionary metalDictionary;
     std::vector<uint32_t> spirv;
+    std::string msl;
 
-    // Populate a SamplerBindingMap for the sole purpose of finding where the post-process bindings
-    // live within the global namespace of samplers.
-    filament::SamplerBindingMap samplerBindingMap;
-    samplerBindingMap.populate();
-    const uint8_t firstSampler =
-            samplerBindingMap.getBlockOffset(filament::BindingPoints::POST_PROCESS);
     bool errorOccured = false;
 
     for (const auto& params : mCodeGenPermutations) {
         const ShaderModel shaderModel = ShaderModel(params.shaderModel);
         const TargetApi targetApi = params.targetApi;
-        const TargetApi codeGenTargetApi = params.codeGenTargetApi;
-        std::vector<uint32_t>* pSpirv = (targetApi == TargetApi::VULKAN) ? &spirv : nullptr;
+        const TargetLanguage targetLanguage = params.targetLanguage;
+
+        // Populate a SamplerBindingMap for the sole purpose of finding where the post-process bindings
+        // live within the global namespace of samplers.
+        filament::SamplerBindingMap samplerBindingMap;
+        samplerBindingMap.populate();
+        const uint8_t firstSampler =
+                samplerBindingMap.getBlockOffset(filament::BindingPoints::POST_PROCESS);
+
+        // Metal Shading Language is cross-compiled from Vulkan.
+        const bool targetApiNeedsSpirv =
+                (targetApi == TargetApi::VULKAN || targetApi == TargetApi::METAL);
+        const bool targetApiNeedsMsl = targetApi == TargetApi::METAL;
+        std::vector<uint32_t>* pSpirv = targetApiNeedsSpirv ? &spirv : nullptr;
+        std::string* pMsl = targetApiNeedsMsl ? &msl : nullptr;
 
         TextEntry glslEntry;
         SpirvEntry spirvEntry;
+        TextEntry metalEntry;
 
         glslEntry.shaderModel = static_cast<uint8_t>(params.shaderModel);
         spirvEntry.shaderModel = static_cast<uint8_t>(params.shaderModel);
+        metalEntry.shaderModel = static_cast<uint8_t>(params.shaderModel);
 
         for (size_t k = 0; k < filament::POST_PROCESS_STAGES_COUNT; k++) {
             glslEntry.variant = static_cast<uint8_t>(k);
             spirvEntry.variant = static_cast<uint8_t>(k);
+            metalEntry.variant = k;
 
             // Vertex Shader
             std::string vs = ShaderPostProcessGenerator::createPostProcessVertexProgram(
-                    shaderModel, targetApi, codeGenTargetApi,
+                    shaderModel, targetApi, targetLanguage,
                     filament::PostProcessStage(k), firstSampler);
 
-            bool ok = postProcessor.process(vs, filament::driver::ShaderType::VERTEX, shaderModel,
-                    &vs, pSpirv);
+            bool ok = postProcessor.process(vs, filament::backend::ShaderType::VERTEX, shaderModel,
+                    &vs, pSpirv, pMsl);
             if (!ok) {
                 // An error occured while postProcessing, aborting.
                 errorOccured = true;
@@ -93,7 +107,7 @@ Package PostprocessMaterialBuilder::build() {
             }
 
             if (targetApi == TargetApi::OPENGL) {
-                glslEntry.stage = filament::driver::ShaderType::VERTEX;
+                glslEntry.stage = filament::backend::ShaderType::VERTEX;
                 glslEntry.shaderSize = vs.size();
                 glslEntry.shader = (char*)malloc(glslEntry.shaderSize + 1);
                 strcpy(glslEntry.shader, vs.c_str());
@@ -102,19 +116,31 @@ Package PostprocessMaterialBuilder::build() {
             }
 
             if (targetApi == TargetApi::VULKAN) {
-                spirvEntry.stage = filament::driver::ShaderType::VERTEX;
+                spirvEntry.stage = filament::backend::ShaderType::VERTEX;
                 spirvEntry.dictionaryIndex = spirvDictionary.addBlob(spirv);
                 spirv.clear();
                 spirvEntries.push_back(spirvEntry);
             }
+            if (targetApi == TargetApi::METAL) {
+                assert(spirv.size() > 0);
+                assert(msl.length() > 0);
+                metalEntry.stage = filament::backend::ShaderType::VERTEX;
+                metalEntry.shaderSize = msl.length();
+                metalEntry.shader = (char*)malloc(metalEntry.shaderSize + 1);
+                strcpy(metalEntry.shader, msl.c_str());
+                spirv.clear();
+                msl.clear();
+                metalDictionary.addText(metalEntry.shader);
+                metalEntries.push_back(metalEntry);
+            }
 
             // Fragment Shader
             std::string fs = ShaderPostProcessGenerator::createPostProcessFragmentProgram(
-                    shaderModel, targetApi, codeGenTargetApi,
+                    shaderModel, targetApi, targetLanguage,
                     filament::PostProcessStage(k), firstSampler);
 
-            ok = postProcessor.process(fs, filament::driver::ShaderType::FRAGMENT, shaderModel, &fs,
-                    pSpirv);
+            ok = postProcessor.process(fs, filament::backend::ShaderType::FRAGMENT, shaderModel, &fs,
+                    pSpirv, pMsl);
             if (!ok) {
                 // An error occured while postProcessing, aborting.
                 errorOccured = true;
@@ -122,7 +148,7 @@ Package PostprocessMaterialBuilder::build() {
             }
 
             if (targetApi == TargetApi::OPENGL) {
-                glslEntry.stage = filament::driver::ShaderType::FRAGMENT;
+                glslEntry.stage = filament::backend::ShaderType::FRAGMENT;
                 glslEntry.shaderSize = fs.size();
                 glslEntry.shader = (char*) malloc(glslEntry.shaderSize + 1);
                 strcpy(glslEntry.shader, fs.c_str());
@@ -131,10 +157,22 @@ Package PostprocessMaterialBuilder::build() {
             }
 
             if (targetApi == TargetApi::VULKAN) {
-                spirvEntry.stage = filament::driver::ShaderType::FRAGMENT;
+                spirvEntry.stage = filament::backend::ShaderType::FRAGMENT;
                 spirvEntry.dictionaryIndex = spirvDictionary.addBlob(spirv);
                 spirv.clear();
                 spirvEntries.push_back(spirvEntry);
+            }
+            if (targetApi == TargetApi::METAL) {
+                assert(spirv.size() > 0);
+                assert(msl.length() > 0);
+                metalEntry.stage = filament::backend::ShaderType::FRAGMENT;
+                metalEntry.shaderSize = msl.length();
+                metalEntry.shader = (char*)malloc(metalEntry.shaderSize + 1);
+                strcpy(metalEntry.shader, msl.c_str());
+                spirv.clear();
+                msl.clear();
+                metalDictionary.addText(metalEntry.shader);
+                metalEntries.push_back(metalEntry);
             }
         }
     }
@@ -155,6 +193,14 @@ Package PostprocessMaterialBuilder::build() {
         container.addChild(&spirvChunk);
     }
 
+    // Emit Metal chunks
+    filamat::DictionaryTextChunk dicMetalChunk(metalDictionary, ChunkType::DictionaryMetal);
+    MaterialTextChunk metalChunk(metalEntries, metalDictionary, ChunkType::MaterialMetal);
+    if (!metalEntries.empty()) {
+        container.addChild(&dicMetalChunk);
+        container.addChild(&metalChunk);
+    }
+
     // Flatten all chunks in the container into a Package.
     size_t packageSize = container.getSize();
     Package package(packageSize);
@@ -164,6 +210,9 @@ Package PostprocessMaterialBuilder::build() {
 
     // Free all shaders that were created earlier.
     for (TextEntry entry : glslEntries) {
+        free(entry.shader);
+    }
+    for (TextEntry entry : metalEntries) {
         free(entry.shader);
     }
     return package;

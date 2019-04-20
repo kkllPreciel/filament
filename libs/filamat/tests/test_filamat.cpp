@@ -24,7 +24,7 @@ using namespace ASTUtils;
 
 static ::testing::AssertionResult PropertyListsMatch(const MaterialBuilder::PropertyList& expected,
         const MaterialBuilder::PropertyList& actual) {
-    for (size_t i = 0; i < filament::MATERIAL_PROPERTIES_COUNT; i++) {
+    for (size_t i = 0; i < MaterialBuilder::MATERIAL_PROPERTIES_COUNT; i++) {
         if (expected[i] != actual[i]) {
             const auto& propString = Enums::toString<Property>(Property(i));
             return ::testing::AssertionFailure()
@@ -61,7 +61,7 @@ protected:
     }
 
     virtual void SetUp() {
-        GLSLTools::init();
+        MaterialBuilder::init();
     }
 };
 
@@ -496,6 +496,24 @@ TEST_F(MaterialCompiler, StaticCodeAnalyzerNormal) {
     expected[size_t(filamat::MaterialBuilder::Property::NORMAL)] = true;
     EXPECT_TRUE(PropertyListsMatch(expected, properties));
 }
+
+TEST_F(MaterialCompiler, StaticCodeAnalyzerOutputFactor) {
+    std::string shaderCode(R"(
+        void material(inout MaterialInputs material) {
+            prepareMaterial(material);
+            material.postLightingColor = vec4(1.0);
+        }
+    )");
+
+    filamat::MaterialBuilder builder = makeBuilder(shaderCode);
+    GLSLTools glslTools;
+    MaterialBuilder::PropertyList properties {false};
+    glslTools.findProperties(builder, properties);
+    MaterialBuilder::PropertyList expected {false};
+    expected[size_t(filamat::MaterialBuilder::Property::POST_LIGHTING_COLOR)] = true;
+    EXPECT_TRUE(PropertyListsMatch(expected, properties));
+}
+
 TEST_F(MaterialCompiler, EmptyName) {
     std::string shaderCode(R"(
         void material(inout MaterialInputs material) {

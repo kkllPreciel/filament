@@ -25,7 +25,7 @@ namespace filamat {
 
 // From driverEnum namespace
 using namespace filament;
-using namespace driver;
+using namespace backend;
 using namespace utils;
 
 std::ostream& CodeGenerator::generateSeparator(std::ostream& out) const {
@@ -41,7 +41,7 @@ std::ostream& CodeGenerator::generateProlog(std::ostream& out, ShaderType type,
             break;
         case ShaderModel::GL_ES_30:
             // Vulkan requires version 310 or higher
-            if (mCodeGenTargetApi == TargetApi::VULKAN) {
+            if (mTargetLanguage == TargetLanguage::SPIRV) {
                 // Vulkan requires layout locations on ins and outs, which were not supported
                 // in the OpenGL 4.1 GLSL profile.
                 out << "#version 310 es\n\n";
@@ -54,7 +54,7 @@ std::ostream& CodeGenerator::generateProlog(std::ostream& out, ShaderType type,
             out << "#define TARGET_MOBILE\n";
             break;
         case ShaderModel::GL_CORE_41:
-            if (mCodeGenTargetApi == TargetApi::VULKAN) {
+            if (mTargetLanguage == TargetLanguage::SPIRV) {
                 // Vulkan requires binding specifiers on uniforms and samplers, which were not
                 // supported in the OpenGL 4.1 GLSL profile.
                 out << "#version 450 core\n\n";
@@ -67,8 +67,11 @@ std::ostream& CodeGenerator::generateProlog(std::ostream& out, ShaderType type,
     if (mTargetApi == TargetApi::VULKAN) {
         out << "#define TARGET_VULKAN_ENVIRONMENT\n";
     }
-    if (mCodeGenTargetApi == TargetApi::VULKAN) {
-        out << "#define CODEGEN_TARGET_VULKAN_ENVIRONMENT\n";
+    if (mTargetApi == TargetApi::METAL) {
+        out << "#define TARGET_METAL_ENVIRONMENT\n";
+    }
+    if (mTargetLanguage == TargetLanguage::SPIRV) {
+        out << "#define TARGET_LANGUAGE_SPIRV\n";
     }
 
     Precision defaultPrecision = getDefaultPrecision(type);
@@ -160,7 +163,7 @@ std::ostream& CodeGenerator::generateVariable(std::ostream& out, ShaderType type
     return out;
 }
 
-std::ostream& CodeGenerator::generateVariables(std::ostream& out, ShaderType type,
+std::ostream& CodeGenerator::generateShaderInputs(std::ostream& out, ShaderType type,
         const AttributeBitset& attributes, Interpolation interpolation) const {
 
     const char* shading = getInterpolationQualifier(interpolation);
@@ -206,9 +209,9 @@ std::ostream& CodeGenerator::generateVariables(std::ostream& out, ShaderType typ
             generateDefine(out, "LOCATION_BONE_WEIGHTS", uint32_t(VertexAttribute::BONE_WEIGHTS));
         }
 
-        out << SHADERS_VARIABLES_VS_DATA;
+        out << SHADERS_INPUTS_VS_DATA;
     } else if (type == ShaderType::FRAGMENT) {
-        out << SHADERS_VARIABLES_FS_DATA;
+        out << SHADERS_INPUTS_FS_DATA;
     }
     return out;
 }
@@ -248,7 +251,7 @@ std::ostream& CodeGenerator::generateUniforms(std::ostream& out, ShaderType shad
     Precision defaultPrecision = getDefaultPrecision(shaderType);
 
     out << "\nlayout(";
-    if (mCodeGenTargetApi == TargetApi::VULKAN) {
+    if (mTargetLanguage == TargetLanguage::SPIRV) {
         uint32_t bindingIndex = (uint32_t) binding; // avoid char output
         out << "binding = " << bindingIndex << ", ";
     }
@@ -277,11 +280,12 @@ std::ostream& CodeGenerator::generateSamplers(
         return out;
     }
 
-    const CString& blockName = sib.getName();
-    std::string instanceName(blockName.c_str());
-    instanceName.front() = char(std::tolower((unsigned char) instanceName.front()));
-
     for (auto const& info : infos) {
+
+        CString uniformName =
+                SamplerInterfaceBlock::getUniformName(
+                        sib.getName().c_str(), info.name.c_str());
+
         auto type = info.type;
         if (type == SamplerType::SAMPLER_EXTERNAL && mShaderModel != ShaderModel::GL_ES_30) {
             // we're generating the shader for the desktop, where we assume external textures
@@ -290,12 +294,21 @@ std::ostream& CodeGenerator::generateSamplers(
         }
         char const* const typeName = getSamplerTypeName(type, info.format, info.multisample);
         char const* const precision = getPrecisionQualifier(info.precision, Precision::DEFAULT);
-        if (mCodeGenTargetApi == TargetApi::VULKAN) {
+        if (mTargetLanguage == TargetLanguage::SPIRV) {
             const uint32_t bindingIndex = (uint32_t) firstBinding + info.offset;
-            out << "layout(binding = " << bindingIndex << ") ";
+            out << "layout(binding = " << bindingIndex;
+
+            // For Vulkan, we place uniforms in set 0 (the default set) and samplers in set 1. This
+            // allows the sampler bindings to live in a separate "namespace" that starts at zero.
+            // Note that the set specifier is not covered by the desktop GLSL spec, including
+            // recent versions. It is only documented in the GL_KHR_vulkan_glsl extension.
+            if (mTargetApi == TargetApi::VULKAN) {
+                out << ", set = 1";
+            }
+
+            out << ") ";
         }
-        out << "uniform " << precision << " " << typeName << " " <<
-                instanceName << "_" << info.name.c_str();
+        out << "uniform " << precision << " " << typeName << " " << uniformName.c_str();
         out << ";\n";
     }
     out << "\n";
@@ -310,23 +323,24 @@ void CodeGenerator::fixupExternalSamplers(
         return;
     }
 
-    const CString& blockName = sib.getName();
-    std::string instanceName(blockName.c_str());
-    instanceName.front() = char(std::tolower((unsigned char) instanceName.front()));
-
     bool hasExternalSampler = false;
 
     // Replace sampler2D declarations by samplerExternal declarations as they may have
     // been swapped during a previous optimization step
     for (auto const& info : infos) {
         if (info.type == SamplerType::SAMPLER_EXTERNAL) {
-            auto name = std::string("sampler2D ") + instanceName + '_' + info.name.c_str();
+
+            CString uniformName =
+                    SamplerInterfaceBlock::getUniformName(
+                            sib.getName().c_str(), info.name.c_str());
+
+            auto name = std::string("sampler2D ") + uniformName.c_str();
             size_t index = shader.find(name);
 
             if (index != std::string::npos) {
                 hasExternalSampler = true;
                 auto newName =
-                        std::string("samplerExternalOES ") + instanceName + '_' + info.name.c_str();
+                        std::string("samplerExternalOES ") + uniformName.c_str();
                 shader.replace(index, name.size(), newName);
             }
         }
@@ -379,7 +393,7 @@ std::ostream& CodeGenerator::generateFunction(std::ostream& out, const char* ret
 }
 
 std::ostream& CodeGenerator::generateMaterialProperty(std::ostream& out,
-        Property property, bool isSet) const {
+        MaterialBuilder::Property property, bool isSet) const {
     if (isSet) {
         out << "#define " << "MATERIAL_HAS_" << getConstantName(property) << "\n";
     }
@@ -436,6 +450,7 @@ std::ostream& CodeGenerator::generateShaderLit(std::ostream& out, ShaderType typ
             case Shading::UNLIT:
                 assert("Lit shader generated with unlit shading model");
                 break;
+            case Shading::SPECULAR_GLOSSINESS:
             case Shading::LIT:
                 out << SHADERS_SHADING_MODEL_STANDARD_FS_DATA;
                 break;
@@ -477,7 +492,8 @@ std::ostream& CodeGenerator::generateShaderUnlit(std::ostream& out, ShaderType t
 }
 
 /* static */
-char const* CodeGenerator::getConstantName(Property property) noexcept {
+char const* CodeGenerator::getConstantName(MaterialBuilder::Property property) noexcept {
+    using Property = MaterialBuilder::Property;
     switch (property) {
         case Property::BASE_COLOR:           return "BASE_COLOR";
         case Property::ROUGHNESS:            return "ROUGHNESS";
@@ -493,8 +509,11 @@ char const* CodeGenerator::getConstantName(Property property) noexcept {
         case Property::SUBSURFACE_POWER:     return "SUBSURFACE_POWER";
         case Property::SUBSURFACE_COLOR:     return "SUBSURFACE_COLOR";
         case Property::SHEEN_COLOR:          return "SHEEN_COLOR";
+        case Property::GLOSSINESS:           return "GLOSSINESS";
+        case Property::SPECULAR_COLOR:       return "SPECULAR_COLOR";
         case Property::EMISSIVE:             return "EMISSIVE";
         case Property::NORMAL:               return "NORMAL";
+        case Property::POST_LIGHTING_COLOR:  return "POST_LIGHTING_COLOR";
     }
 }
 
@@ -556,7 +575,7 @@ char const* CodeGenerator::getSamplerTypeName(SamplerType type, SamplerFormat fo
             // Vulkan doesn't have external textures in the sense as GL. Vulkan external textures
             // are created via VK_ANDROID_external_memory_android_hardware_buffer, but they are
             // backed by VkImage just like a normal texture, and sampled from normally.
-            return (mCodeGenTargetApi == TargetApi::VULKAN) ? "sampler2D" : "samplerExternalOES";
+            return (mTargetLanguage == TargetLanguage::SPIRV) ? "sampler2D" : "samplerExternalOES";
     }
 }
 

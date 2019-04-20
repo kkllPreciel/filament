@@ -26,7 +26,7 @@
 namespace filament {
 
 using namespace details;
-using namespace driver;
+using namespace backend;
 
 struct Texture::BuilderDetails {
     uint32_t mWidth = 1;
@@ -161,6 +161,9 @@ void FTexture::setImage(FEngine& engine, size_t level,
 
 void FTexture::setExternalImage(FEngine& engine, void* image) noexcept {
     if (mTarget == Sampler::SAMPLER_EXTERNAL) {
+        // The call to setupExternalImage is synchronous, and allows the driver to take ownership of
+        // the external image on this thread, if necessary.
+        engine.getDriverApi().setupExternalImage(image);
         engine.getDriverApi().setExternalImage(mHandle, image);
     }
 }
@@ -175,14 +178,74 @@ void FTexture::setExternalStream(FEngine& engine, FStream* stream) noexcept {
         engine.getDriverApi().setExternalStream(mHandle, stream->getHandle());
     } else {
         mStream = nullptr;
-        engine.getDriverApi().setExternalStream(mHandle, Handle<HwStream>());
+        engine.getDriverApi().setExternalStream(mHandle, backend::Handle<backend::HwStream>());
+    }
+}
+
+static bool isColorRenderable(FEngine& engine, Texture::InternalFormat format) {
+    switch (format) {
+        case Texture::InternalFormat::DEPTH16:
+        case Texture::InternalFormat::DEPTH24:
+        case Texture::InternalFormat::DEPTH32F:
+        case Texture::InternalFormat::DEPTH24_STENCIL8:
+        case Texture::InternalFormat::DEPTH32F_STENCIL8:
+            return false;
+        default:
+            return engine.getDriverApi().isRenderTargetFormatSupported(format);
     }
 }
 
 void FTexture::generateMipmaps(FEngine& engine) const noexcept {
-    if ((mTarget == Sampler::SAMPLER_2D || mTarget == Sampler::SAMPLER_CUBEMAP)
-            && mLevels > 1) {
-        engine.getDriverApi().generateMipmaps(mHandle);
+    // The OpenGL spec for GenerateMipmap stipulates that it returns INVALID_OPERATION unless
+    // the sized internal format is both color-renderable and texture-filterable.
+    if (!ASSERT_POSTCONDITION_NON_FATAL(isColorRenderable(engine, mFormat),
+            "Texture format must be color renderable")) {
+        return;
+    }
+    if (mLevels == 1 || (mWidth == 1 && mHeight == 1)) {
+        return;
+    }
+
+    if (engine.getDriverApi().canGenerateMipmaps()) {
+         engine.getDriverApi().generateMipmaps(mHandle);
+         return;
+    }
+
+    auto generateMipsForLayer = [this, &engine](uint16_t layer) {
+        FEngine::DriverApi& driver = engine.getDriverApi();
+
+        // Wrap miplevel 0 in a render target so that we can use it as a blit source.
+        uint8_t level = 0;
+        uint32_t srcw = mWidth;
+        uint32_t srch = mHeight;
+        backend::Handle<backend::HwRenderTarget> srcrth = driver.createRenderTarget(TargetBufferFlags::COLOR,
+                srcw, srch, mSampleCount, mFormat, { mHandle, level++, layer }, {}, {});
+
+        // Perform a blit for all miplevels down to 1x1.
+        backend::Handle<backend::HwRenderTarget> dstrth;
+        do {
+            uint32_t dstw = std::max(srcw >> 1, 1u);
+            uint32_t dsth = std::max(srch >> 1, 1u);
+            dstrth = driver.createRenderTarget(TargetBufferFlags::COLOR, dstw, dsth, mSampleCount,
+                    mFormat, { mHandle, level++, layer }, {}, {});
+            driver.blit(TargetBufferFlags::COLOR,
+                    dstrth, { 0, 0, dstw, dsth },
+                    srcrth, { 0, 0, srcw, srch },
+                    SamplerMagFilter::LINEAR);
+            driver.destroyRenderTarget(srcrth);
+            srcrth = dstrth;
+            srcw = dstw;
+            srch = dsth;
+        } while ((srcw > 1 || srch > 1) && level < mLevels);
+        driver.destroyRenderTarget(dstrth);
+    };
+
+    if (mTarget == Sampler::SAMPLER_2D) {
+        generateMipsForLayer(0);
+    } else if (mTarget == Sampler::SAMPLER_CUBEMAP) {
+        for (uint16_t layer = 0; layer < 6; ++layer) {
+            generateMipsForLayer(layer);
+        }
     }
 }
 

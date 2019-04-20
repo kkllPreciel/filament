@@ -48,7 +48,7 @@
 
 using namespace filament;
 using namespace filagui;
-using namespace math;
+using namespace filament::math;
 using namespace utils;
 
 FilamentApp& FilamentApp::get() {
@@ -192,7 +192,16 @@ void FilamentApp::run(const Config& config, SetupCallback setupCallback,
 
     bool mousePressed[3] = { false };
 
+    int sidebarWidth = mSidebarWidth;
+
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+
     while (!mClosed) {
+
+        if (mSidebarWidth != sidebarWidth) {
+            window->configureCamerasForWindow();
+            sidebarWidth = mSidebarWidth;
+        }
 
         if (!UTILS_HAS_THREADING) {
             mEngine->execute();
@@ -277,6 +286,12 @@ void FilamentApp::run(const Config& config, SetupCallback setupCallback,
                     if (!io || !io->WantCaptureMouse)
                         window->mouseMoved(event.motion.x, event.motion.y);
                     break;
+                case SDL_DROPFILE:
+                    if (mDropHandler) {
+                        mDropHandler(event.drop.file);
+                    }
+                    SDL_free(event.drop.file);
+                    break;
                 case SDL_WINDOWEVENT:
                     switch (event.window.event) {
                         case SDL_WINDOWEVENT_RESIZED:
@@ -350,6 +365,8 @@ void FilamentApp::run(const Config& config, SetupCallback setupCallback,
                 renderer->render(view->getView());
             }
             renderer->endFrame();
+        } else {
+            ++mSkippedFrames;
         }
 
         if (postRender) {
@@ -422,16 +439,30 @@ FilamentApp::Window::Window(FilamentApp* filamentApp,
     // For single-threaded platforms, we need to ensure that Filament's OpenGL context is current,
     // rather than the one created by SDL.
     mFilamentApp->mEngine = Engine::create(config.backend);
-
-    // HACK: We don't use SDL's 2D rendering functionality, but by invoking it we cause
-    // SDL to create a Metal backing layer, which allows us to run Vulkan apps via MoltenVK.
-    #if defined(FILAMENT_DRIVER_SUPPORTS_VULKAN) && defined(__APPLE__)
-    constexpr int METAL_DRIVER = 2;
-    SDL_CreateRenderer(mWindow, METAL_DRIVER, SDL_RENDERER_ACCELERATED);
-    #endif
+    mBackend = config.backend;
 
     void* nativeWindow = ::getNativeWindow(mWindow);
-    mSwapChain = mFilamentApp->mEngine->createSwapChain(nativeWindow);
+    void* nativeSwapChain = nativeWindow;
+
+#if defined(__APPLE__)
+
+    void* metalLayer = nullptr;
+    if (config.backend == filament::Engine::Backend::METAL) {
+        metalLayer = setUpMetalLayer(nativeWindow);
+        // The swap chain on Metal is a CAMetalLayer.
+        nativeSwapChain = metalLayer;
+    }
+
+#if defined(FILAMENT_DRIVER_SUPPORTS_VULKAN)
+    if (config.backend == filament::Engine::Backend::VULKAN) {
+        // We request a Metal layer for rendering via MoltenVK.
+        setUpMetalLayer(nativeWindow);
+    }
+#endif
+
+#endif
+
+    mSwapChain = mFilamentApp->mEngine->createSwapChain(nativeSwapChain);
     mRenderer = mFilamentApp->mEngine->createRenderer();
 
     // create cameras
@@ -550,7 +581,27 @@ void FilamentApp::Window::fixupMouseCoordinatesForHdpi(ssize_t& x, ssize_t& y) c
 
 void FilamentApp::Window::resize() {
     mFilamentApp->mEngine->destroy(mSwapChain);
-    mSwapChain = mFilamentApp->mEngine->createSwapChain(::getNativeWindow(mWindow));
+    void* nativeWindow = ::getNativeWindow(mWindow);
+    void* nativeSwapChain = nativeWindow;
+
+#if defined(__APPLE__)
+
+    void* metalLayer = nullptr;
+    if (mBackend == filament::Engine::Backend::METAL) {
+        metalLayer = resizeMetalLayer(nativeWindow);
+        // The swap chain on Metal is a CAMetalLayer.
+        nativeSwapChain = metalLayer;
+    }
+
+#if defined(FILAMENT_DRIVER_SUPPORTS_VULKAN)
+    if (mBackend == filament::Engine::Backend::VULKAN) {
+        resizeMetalLayer(nativeWindow);
+    }
+#endif
+
+#endif
+
+    mSwapChain = mFilamentApp->mEngine->createSwapChain(nativeSwapChain);
     configureCamerasForWindow();
 }
 
@@ -571,10 +622,11 @@ void FilamentApp::Window::configureCamerasForWindow() {
 
     const float3 at(0, 0, -4);
     const double ratio = double(h) / double(w);
+    const int sidebar = mFilamentApp->mSidebarWidth * dpiScaleX;
 
     double near = 0.1;
     double far = 50;
-    mMainCamera->setProjection(45.0, double(w) / h, near, far, Camera::Fov::VERTICAL);
+    mMainCamera->setProjection(45.0, double(w - sidebar) / h, near, far, Camera::Fov::VERTICAL);
     mDebugCamera->setProjection(45.0, double(w) / h, 0.0625, 4096, Camera::Fov::VERTICAL);
     mOrthoCamera->setProjection(Camera::Projection::ORTHO, -3, 3, -3 * ratio, 3 * ratio, near, far);
     mOrthoCamera->lookAt(at + float3{ 4, 0, 0 }, at);
@@ -597,7 +649,7 @@ void FilamentApp::Window::configureCamerasForWindow() {
         mGodView->getCameraManipulator()->updateCameraTransform();
         mOrthoView->getCameraManipulator()->updateCameraTransform();
     } else {
-        mMainView->setViewport({ 0, 0, w, h });
+        mMainView->setViewport({ sidebar, 0, w - sidebar, h });
     }
     mUiView->setViewport({ 0, 0, w, h });
 }

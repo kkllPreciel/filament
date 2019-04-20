@@ -32,37 +32,25 @@
 #include "CodeGenerator.h"
 
 using namespace filament;
-using namespace filament::driver;
+using namespace filament::backend;
 
 namespace filamat {
 
 static const char* getShadingDefine(filament::Shading shading) noexcept {
     switch (shading) {
-        case filament::Shading::LIT:         return "SHADING_MODEL_LIT";
-        case filament::Shading::UNLIT:       return "SHADING_MODEL_UNLIT";
-        case filament::Shading::SUBSURFACE:  return "SHADING_MODEL_SUBSURFACE";
-        case filament::Shading::CLOTH:       return "SHADING_MODEL_CLOTH";
+        case filament::Shading::LIT:                 return "SHADING_MODEL_LIT";
+        case filament::Shading::UNLIT:               return "SHADING_MODEL_UNLIT";
+        case filament::Shading::SUBSURFACE:          return "SHADING_MODEL_SUBSURFACE";
+        case filament::Shading::CLOTH:               return "SHADING_MODEL_CLOTH";
+        case filament::Shading::SPECULAR_GLOSSINESS: return "SHADING_MODEL_SPECULAR_GLOSSINESS";
     }
 }
 
 static void generateMaterialDefines(std::ostream& os, const CodeGenerator& cg,
         MaterialBuilder::PropertyList const properties) noexcept {
-    cg.generateMaterialProperty(os, Property::BASE_COLOR,           properties[ 0]);
-    cg.generateMaterialProperty(os, Property::ROUGHNESS,            properties[ 1]);
-    cg.generateMaterialProperty(os, Property::METALLIC,             properties[ 2]);
-    cg.generateMaterialProperty(os, Property::REFLECTANCE,          properties[ 3]);
-    cg.generateMaterialProperty(os, Property::AMBIENT_OCCLUSION,    properties[ 4]);
-    cg.generateMaterialProperty(os, Property::CLEAR_COAT,           properties[ 5]);
-    cg.generateMaterialProperty(os, Property::CLEAR_COAT_ROUGHNESS, properties[ 6]);
-    cg.generateMaterialProperty(os, Property::CLEAR_COAT_NORMAL,    properties[ 7]);
-    cg.generateMaterialProperty(os, Property::ANISOTROPY,           properties[ 8]);
-    cg.generateMaterialProperty(os, Property::ANISOTROPY_DIRECTION, properties[ 9]);
-    cg.generateMaterialProperty(os, Property::THICKNESS,            properties[10]);
-    cg.generateMaterialProperty(os, Property::SUBSURFACE_POWER,     properties[11]);
-    cg.generateMaterialProperty(os, Property::SUBSURFACE_COLOR,     properties[12]);
-    cg.generateMaterialProperty(os, Property::SHEEN_COLOR,          properties[13]);
-    cg.generateMaterialProperty(os, Property::EMISSIVE,             properties[14]);
-    cg.generateMaterialProperty(os, Property::NORMAL,               properties[15]);
+    for (size_t i = 0; i < MaterialBuilder::MATERIAL_PROPERTIES_COUNT; i++) {
+        cg.generateMaterialProperty(os, static_cast<MaterialBuilder::Property>(i), properties[i]);
+    }
 }
 
 static void generateVertexDomain(const CodeGenerator& cg, std::stringstream& vs,
@@ -140,24 +128,22 @@ ShaderGenerator::ShaderGenerator(
     }
 }
 
-const std::string ShaderGenerator::createVertexProgram(filament::driver::ShaderModel shaderModel,
-        MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetApi codeGenTargetApi,
+const std::string ShaderGenerator::createVertexProgram(filament::backend::ShaderModel shaderModel,
+        MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetLanguage targetLanguage,
         MaterialInfo const& material, uint8_t variantKey, filament::Interpolation interpolation,
         filament::VertexDomain vertexDomain) const noexcept {
     std::stringstream vs;
 
-    const CodeGenerator cg(shaderModel, targetApi, codeGenTargetApi);
+    const CodeGenerator cg(shaderModel, targetApi, targetLanguage);
     const bool lit = material.isLit;
     const filament::Variant variant(variantKey);
 
     cg.generateProlog(vs, ShaderType::VERTEX, material.hasExternalSamplers);
 
-    if (cg.getShaderModel() >= filament::driver::ShaderModel::GL_CORE_41) {
-        // TODO: find a better way to set this, esp. on mobile
-        cg.generateDefine(vs, "GEOMETRIC_SPECULAR_AA_ROUGHNESS", true);
-        cg.generateDefine(vs, "GEOMETRIC_SPECULAR_AA_NORMAL", true);
-    }
-    bool litVariants = lit || (!lit && material.hasShadowMultiplier);
+    cg.generateDefine(vs, "FLIP_UV_ATTRIBUTE", material.flipUV);
+    cg.generateDefine(vs, "GEOMETRIC_SPECULAR_AA_NORMAL", material.limitOverInterpolation);
+
+    bool litVariants = lit || material.hasShadowMultiplier;
     cg.generateDefine(vs, "HAS_DIRECTIONAL_LIGHTING", litVariants && variant.hasDirectionalLighting());
     cg.generateDefine(vs, "HAS_SHADOWING", litVariants && variant.hasShadowReceiver());
     cg.generateDefine(vs, "HAS_SHADOW_MULTIPLIER", material.hasShadowMultiplier);
@@ -170,7 +156,7 @@ const std::string ShaderGenerator::createVertexProgram(filament::driver::ShaderM
         attributes.set(VertexAttribute::BONE_INDICES);
         attributes.set(VertexAttribute::BONE_WEIGHTS);
     }
-    cg.generateVariables(vs, ShaderType::VERTEX, attributes, interpolation);
+    cg.generateShaderInputs(vs, ShaderType::VERTEX, attributes, interpolation);
 
     // custom material variables
     size_t variableIndex = 0;
@@ -230,12 +216,12 @@ bool ShaderGenerator::hasCustomDepthShader() const noexcept {
     return false;
 }
 
-const std::string ShaderGenerator::createFragmentProgram(filament::driver::ShaderModel shaderModel,
-        MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetApi codeGenTargetApi,
+const std::string ShaderGenerator::createFragmentProgram(filament::backend::ShaderModel shaderModel,
+        MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetLanguage targetLanguage,
         MaterialInfo const& material, uint8_t variantKey,
         filament::Interpolation interpolation) const noexcept {
 
-    const CodeGenerator cg(shaderModel, targetApi, codeGenTargetApi);
+    const CodeGenerator cg(shaderModel, targetApi, targetLanguage);
     const bool lit = material.isLit;
     const filament::Variant variant(variantKey);
 
@@ -248,15 +234,20 @@ const std::string ShaderGenerator::createFragmentProgram(filament::driver::Shade
     // this should probably be a code generation option
     cg.generateDefine(fs, "USE_MULTIPLE_SCATTERING_COMPENSATION", true);
 
+    cg.generateDefine(fs, "GEOMETRIC_SPECULAR_AA_ROUGHNESS", material.curvatureToRoughness);
+    cg.generateDefine(fs, "GEOMETRIC_SPECULAR_AA_NORMAL", material.limitOverInterpolation);
+
+    cg.generateDefine(fs, "CLEAR_COAT_IOR_CHANGE", material.clearCoatIorChange);
+
     // lighting variants
-    bool litVariants = lit || (!lit && material.hasShadowMultiplier);
+    bool litVariants = lit || material.hasShadowMultiplier;
     cg.generateDefine(fs, "HAS_DIRECTIONAL_LIGHTING", litVariants && variant.hasDirectionalLighting());
     cg.generateDefine(fs, "HAS_DYNAMIC_LIGHTING", litVariants && variant.hasDynamicLighting());
     cg.generateDefine(fs, "HAS_SHADOWING", litVariants && variant.hasShadowReceiver());
     cg.generateDefine(fs, "HAS_SHADOW_MULTIPLIER", material.hasShadowMultiplier);
 
     // material defines
-    cg.generateDefine(fs, "MATERIAL_IS_DOUBLE_SIDED", material.isDoubleSided);
+    cg.generateDefine(fs, "MATERIAL_HAS_DOUBLE_SIDED_CAPABILITY", material.hasDoubleSidedCapability);
     switch (material.blendingMode) {
         case BlendingMode::OPAQUE:
             cg.generateDefine(fs, "BLEND_MODE_OPAQUE", true);
@@ -276,10 +267,23 @@ const std::string ShaderGenerator::createFragmentProgram(filament::driver::Shade
             cg.generateDefine(fs, "BLEND_MODE_MASKED", true);
             break;
     }
+    switch (material.postLightingBlendingMode) {
+        case BlendingMode::OPAQUE:
+            cg.generateDefine(fs, "POST_LIGHTING_BLEND_MODE_OPAQUE", true);
+            break;
+        case BlendingMode::TRANSPARENT:
+            cg.generateDefine(fs, "POST_LIGHTING_BLEND_MODE_TRANSPARENT", true);
+            break;
+        case BlendingMode::ADD:
+            cg.generateDefine(fs, "POST_LIGHTING_BLEND_MODE_ADD", true);
+            break;
+        default:
+            break;
+    }
     cg.generateDefine(fs, getShadingDefine(material.shading), true);
     generateMaterialDefines(fs, cg, mProperties);
 
-    cg.generateVariables(fs, ShaderType::FRAGMENT, material.requiredAttributes, interpolation);
+    cg.generateShaderInputs(fs, ShaderType::FRAGMENT, material.requiredAttributes, interpolation);
 
     // custom material variables
     size_t variableIndex = 0;
@@ -308,11 +312,6 @@ const std::string ShaderGenerator::createFragmentProgram(filament::driver::Shade
     cg.generateCommonMaterial(fs, ShaderType::FRAGMENT);
     cg.generateParameters(fs, ShaderType::FRAGMENT);
 
-    if (material.blendingMode == BlendingMode::MASKED) {
-        cg.generateFunction(fs, "float", "getMaskThreshold",
-                "    return materialParams.maskThreshold;");
-    }
-
     // shading model
     if (variant.isDepthPass()) {
         if (material.blendingMode == BlendingMode::MASKED) {
@@ -337,7 +336,7 @@ const std::string ShaderGenerator::createFragmentProgram(filament::driver::Shade
     return fs.str();
 }
 
-void ShaderGenerator::fixupExternalSamplers(filament::driver::ShaderModel sm,
+void ShaderGenerator::fixupExternalSamplers(filament::backend::ShaderModel sm,
         std::string& shader, MaterialInfo const& material) const noexcept {
     // External samplers are only supported on GL ES at the moment, we must
     // skip the fixup on desktop targets
@@ -347,10 +346,10 @@ void ShaderGenerator::fixupExternalSamplers(filament::driver::ShaderModel sm,
 }
 
 const std::string ShaderPostProcessGenerator::createPostProcessVertexProgram(
-        filament::driver::ShaderModel sm, MaterialBuilder::TargetApi targetApi,
-        MaterialBuilder::TargetApi codeGenTargetApi, filament::PostProcessStage variant,
+        filament::backend::ShaderModel sm, MaterialBuilder::TargetApi targetApi,
+        MaterialBuilder::TargetLanguage targetLanguage, filament::PostProcessStage variant,
         uint8_t firstSampler) noexcept {
-    const CodeGenerator cg(sm, targetApi, codeGenTargetApi);
+    const CodeGenerator cg(sm, targetApi, targetLanguage);
     std::stringstream vs;
     cg.generateProlog(vs, ShaderType::VERTEX, false);
     cg.generateDefine(vs, "LOCATION_POSITION", uint32_t(VertexAttribute::POSITION));
@@ -370,10 +369,10 @@ const std::string ShaderPostProcessGenerator::createPostProcessVertexProgram(
 }
 
 const std::string ShaderPostProcessGenerator::createPostProcessFragmentProgram(
-        filament::driver::ShaderModel sm, MaterialBuilder::TargetApi targetApi,
-        MaterialBuilder::TargetApi codeGenTargetApi, filament::PostProcessStage variant,
+        filament::backend::ShaderModel sm, MaterialBuilder::TargetApi targetApi,
+        MaterialBuilder::TargetLanguage targetLanguage, filament::PostProcessStage variant,
         uint8_t firstSampler) noexcept {
-    const CodeGenerator cg(sm, targetApi, codeGenTargetApi);
+    const CodeGenerator cg(sm, targetApi, targetLanguage);
     std::stringstream fs;
     cg.generateProlog(fs, ShaderType::FRAGMENT, false);
     generatePostProcessStageDefines(fs, cg, variant);

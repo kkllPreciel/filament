@@ -2,6 +2,8 @@
 
 <style>img { max-width: 100%; }</style>
 
+**Filament Materials Guide**
+
 ![](images/filament_logo.png)
 
 # About
@@ -57,6 +59,7 @@ Filament materials can use one of the following material models:
 - Subsurface
 - Cloth
 - Unlit
+- Specular glossiness (legacy)
 
 ## Lit model
 
@@ -85,6 +88,7 @@ in table [standardProperties].
 **normal**              | A detail normal used to perturb the surface using _bump mapping_ (_normal mapping_)
 **clearCoatNormal**     | A detail normal used to perturb the clear coat layer using _bump mapping_ (_normal mapping_)
 **emissive**            | Additional diffuse albedo to simulate emissive surfaces (such as neons, etc.) This property is mostly useful in an HDR pipeline with a bloom pass
+**postLightingColor**   | Additional color that can be blended with the result of the lighting computations. See `postLightingBlending`
 [Table [standardProperties]: Properties of the standard model]
 
 The type and range of each property is described in table [standardPropertiesTypes].
@@ -103,6 +107,7 @@ The type and range of each property is described in table [standardPropertiesTyp
 **normal**              | float3   |  [0..1]                  | Linear RGB, encodes a direction vector in tangent space
 **clearCoatNormal**     | float3   |  [0..1]                  | Linear RGB, encodes a direction vector in tangent space
 **emissive**            | float4   |  rgb=[0..1], a=[-n..n]   | Alpha is the exposure compensation
+**postLightingColor**   | float4   |  [0..1]                  | Pre-multiplied linear RGB
 [Table [standardPropertiesTypes]: Range and type of the standard model's properties]
 
 
@@ -371,6 +376,21 @@ The exposure compensation value of the emissive property can be used to force th
 to be brighter (positive values) or darker (negative values) than the current exposure. If the bloom
 effect is enabled, using a positive exposure compensation can force the surface to bloom.
 
+### Post-lighting color
+
+The `postLightingColor` can be used to modify the surface color after lighting computations. This
+property has no physical meaning and only exists to implement specific effects or to help with
+debugging. This property is defined as a `float4` value containing a pre-multiplied RGB color in
+linear space.
+
+The post-lighting color is blended with the result of lighting according to the blending mode
+specified by the `postLightingBlending` material option. Please refer to the documentation of
+this option for more information.
+
+!!! Tip
+    `postLightingColor` can be used as a simpler `emissive` property by setting
+    `postLightingBlending` to `add` and by providing an RGB color with alpha set to `0.0`.
+
 ## Subsurface model
 
 ### Thickness
@@ -434,9 +454,6 @@ Chromaticity information should instead be set on the sheen color. To create mor
 such as denim, cotton, etc. use the base color for chromaticity and use the default sheen color
 or set the sheen color to the luminance of the base color.
 
-!!! Warning
-    The cloth material model is more expensive than the standard material model.
-
 !!! Tip
     To see the effect of the `roughness` parameter make sure the `sheenColor` is brighter than
     `baseColor`. This can be used to create a fuzz effect. Taking the luminance of `baseColor`
@@ -484,6 +501,7 @@ in table [unlitProperties].
 ---------------------:|:---------------------
 **baseColor**         | Surface diffuse color
 **emissive**          | Additional diffuse color to simulate emissive surfaces. This property is mostly useful in an HDR pipeline with a bloom pass
+**postLightingColor** | Additional color to blend with base color and emissive
 [Table [unlitProperties]: Properties of the standard model]
 
 The type and range of each property is described in table [unlitPropertiesTypes].
@@ -492,15 +510,42 @@ The type and range of each property is described in table [unlitPropertiesTypes]
 ---------------------:|:--------:|:------------------------:|:-------------------------
 **baseColor**         | float4   |  [0..1]                  | Pre-multiplied linear RGB
 **emissive**          | float4   |  rgb=[0..1], a=N/A       | Pre-multiplied linear RGB, alpha is ignored
+**postLightingColor** | float4   |  [0..1]                  | Pre-multiplied linear RGB
 [Table [unlitPropertiesTypes]: Range and type of the unlit model's properties]
 
 The value of `emissive` is simply added to `baseColor` when present. The main use of `emissive`
-is to force an unlit surface to bloom if the HDR pipeline is configured with a bloom pass.
+is to force an unlit surface to bloom if the HDR pipeline is configured with a bloom pass. The value
+of `postLightingColor` is blended with the sum of `emissive` and `baseColor` according to the
+blending mode specified by the `postLightingBlending` material option.
 
 Figure [materialUnlit] shows an example of the unlit material model
 (click on the image to see a larger version).
 
 ![Figure [materialUnlit]: The unlit model is used to render debug information](images/screenshot_unlit.jpg)
+
+## Specular glossiness
+
+This alternative lighting model exists to comply with legacy standards. Since it is not a
+physically-based formulation, we do not recommend using it except when loading legacy assets.
+
+This model encompasses the parameters previously defined for the standard lit mode except for
+_metallic_, _reflectance_, and _roughness_. It adds parameters for _specularColor_ and _glossiness_.
+
+Parameter             |      Definition
+---------------------:|:---------------------
+**baseColor**         | Surface diffuse color
+**specularColor**     | Specular tint (defaults to black)
+**glossiness**        | Glossiness (defaults to 0.0)
+[Table [glossinessProperties]: Properties of the specular-glossiness shading model]
+
+The type and range of each property is described in table [glossinessPropertiesTypes].
+
+       Property       |   Type   |            Range         |           Note
+---------------------:|:--------:|:------------------------:|:-------------------------
+**baseColor**         | float4   |  [0..1]                  | Pre-multiplied linear RGB
+**specularColor**     | float3   |  [0..1]                  | Linear RGB
+**glossiness**        | float    |  [0..1]                  | Inverse of roughness
+[Table [glossinessPropertiesTypes]: Range and type of the specular-glossiness model's properties]
 
 # Material definitions
 
@@ -636,7 +681,7 @@ Type
 :    `string`
 
 Value
-:     Any of `lit`, `subsurface`, `cloth`, `unlit`. Defaults to `lit`.
+:     Any of `lit`, `subsurface`, `cloth`, `unlit`, `specularGlossiness`. Defaults to `lit`.
 
 Description
 :     Selects the material model as described in the Material models section.
@@ -859,6 +904,30 @@ material {
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+### postLightingBlending
+
+Type
+:    `string`
+
+Value
+:     Any of `opaque`, `transparent`, `add`. Defaults to `transparent`.
+
+Description
+:     Defines how the `postLightingColor` material property is blended with the result of the
+      lighting computations. The possible blending modes are:
+
+    - **Opaque**: blending is disabled, the material will output `postLightingColor` directly.
+    - **Transparent**: blending is enabled. The material's computed color is alpha composited with
+      the `postLightingColor`, using Porter-Duff's `source over` rule. This blending mode assumes
+      pre-multiplied alpha.
+    - **Add**: blending is enabled. The material's computed color is added to `postLightingColor`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ JSON
+material {
+    postLightingBlending : add
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 ### vertexDomain
 
 Type
@@ -985,9 +1054,10 @@ Value
 :     `true` or `false`. Defaults to `false`.
 
 Description
-:     Enables or disables two-sided rendering. When set to `true`, `culling` is automatically set to
-      `none`; if the triangle is back-facing, the triangle's normal is automatically flipped to
-      become front-facing.
+:     Enables two-sided rendering and its capability to be toggled at run time. When set to `true`,
+      `culling` is automatically set to `none`; if the triangle is back-facing, the triangle's
+      normal is flipped to become front-facing. When explicitly set to `false`, this allows the
+      doubleSided property to be toggled at run time.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ JSON
 material {
@@ -1084,6 +1154,73 @@ fragment {
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+### curvatureToRoughness
+
+Type
+:    `boolean`
+
+Value
+:     `true` or `false`. Defaults to `false`.
+
+Description
+:    Reduces specular aliasing by increasing roughness based on the local geometric curvature.
+     This property is particularly effective if you only use MSAA as your anti-aliasing method.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ JSON
+material {
+    curvatureToRoughness : true
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+![Figure [curvatureToRoughness]: Close up of a glossy metallic surface rendered normally (left) and
+with `curvatureToRoughness` (right).](images/screenshot_curvature_to_roughness.jpg)
+
+### limitOverInterpolation
+
+Type
+:    `boolean`
+
+Value
+:     `true` or `false`. Defaults to `false`.
+
+Description
+:    Reduces specular aliasing by attempting to eliminate normal over-interpolation. When this
+     property is turned on, the material switches to centroid normal interpolation when the
+     interpolated normals are too long. This property should only be used if your anti-aliasing
+     method is MSAA. The effects are a lot more subtle than `curvatureToRoughness`, which should be
+     used first to eliminate specular aliasing.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ JSON
+material {
+    limitOverInterpolation : true
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+### clearCoatIorChange
+
+Type
+:    `boolean`
+
+Value
+:     `true` or `false`. Defaults to `true`.
+
+Description
+:    When adding a clear coat layer, the change in index of refraction (IoR) is taken into account
+     to modify the specular color of the base layer. This appears to darken `baseColor`. When this
+     effect is disabled, `baseColor` is left unmodified. See figure [clearCoatIorChange] for an
+     example of how this property can affect a red metallic base layer.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ JSON
+material {
+    clearCoatIorChange : false
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+![Figure [clearCoatIorChange]: The same rough metallic ball with a clear coat layer rendered
+with `clearCoatIorChange` enabled (left) and disabled
+(right).](images/screenshot_clear_coat_ior_change.jpg)
+
 ### variantFilter
 
 Type
@@ -1114,6 +1251,25 @@ material {
     shadowMultiplier : true,
     blending : transparent,
     variantFilter : [ skinning ]
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+### flipUV
+
+Type
+:    `boolean`
+
+Value
+:     `true` or `false`. Defaults to `true`.
+
+Description
+:    When set to `true` (default value), the Y coordinate of UV attributes will be flipped when
+     read by this material's vertex shader. Flipping is equivalent to `y = 1.0 - y`. When set
+     to `false`, flipping is disabled and the UV attributes are read as is.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ JSON
+material {
+    flipUV : false
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1172,6 +1328,11 @@ struct MaterialVertexInputs {
     float4 variable3;     // if 4 or more variables is defined
 };
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+!!! TIP: UV attributes
+    By default the vertex shader of a material will flip the Y coordinate of the UV attributes
+    of the current mesh: `material.uv0 = vec2(mesh_uv0.x, 1.0 - mesh_uv0.y)`. You can control
+    this behavior using the `flipUV` property and setting it to `false`.
 
 ## Fragment block
 
@@ -1247,11 +1408,12 @@ fragment {
 struct MaterialInputs {
     float4 baseColor;           // default: float4(1.0)
     float4 emissive;            // default: float4(0.0)
+    float4 postLightingColor;   // default: float4(0.0)
 
     // no other field is available with the unlit shading model
     float  roughness;           // default: 1.0
-    float  metallic;            // default: 0.0, not available with cloth
-    float  reflectance;         // default: 0.5, not available with cloth
+    float  metallic;            // default: 0.0, not available with cloth or specularGlossiness
+    float  reflectance;         // default: 0.5, not available with cloth or specularGlossiness
     float  ambientOcclusion;    // default: 0.0
 
     // not available when the shading model is subsurface or cloth
@@ -1267,12 +1429,16 @@ struct MaterialInputs {
     float3 subsurfaceColor;     // default: float3(1.0)
 
     // only available when the shading model is cloth
-    float3 sheenColor;         // default: sqrt(baseColor)
-    float3 subsurfaceColor;    // default: float3(0.0)
+    float3 sheenColor;          // default: sqrt(baseColor)
+    float3 subsurfaceColor;     // default: float3(0.0)
+
+    // only available when the shading model is specularGlossiness
+    float3 specularColor;       // default: float3(0.0)
+    float  glossiness;          // default: 0.0
 
     // not available when the shading model is unlit
     // must be set before calling prepareMaterial()
-    float3 normal;             // default: float3(0.0, 0.0, 1.0)
+    float3 normal;              // default: float3(0.0, 0.0, 1.0)
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -14,8 +14,7 @@
 #define SPECULAR_D_GGX_ANISOTROPIC  0
 
 // Cloth NDFs
-#define SPECULAR_D_ASHIKHMIN        0
-#define SPECULAR_D_CHARLIE          1
+#define SPECULAR_D_CHARLIE          0
 
 // Visibility functions
 #define SPECULAR_V_SMITH_GGX        0
@@ -92,16 +91,6 @@ float D_GGX_Anisotropic(float at, float ab, float ToH, float BoH, float NoH) {
     return a2 * b2 * b2 * (1.0 / PI);
 }
 
-float D_Ashikhmin(float linearRoughness, float NoH) {
-    // Ashikhmin 2007, "Distribution-based BRDFs"
-	float a2 = linearRoughness * linearRoughness;
-	float cos2h = NoH * NoH;
-	float sin2h = max(1.0 - cos2h, 0.0078125); // 2^(-14/2), so sin2h^2 > 0 in fp16
-	float sin4h = sin2h * sin2h;
-	float cot2 = -cos2h / (a2 * sin2h);
-	return 1.0 / (PI * (4.0 * a2 + 1.0) * sin4h) * (4.0 * exp(cot2) + sin4h);
-}
-
 float D_Charlie(float linearRoughness, float NoH) {
     // Estevez and Kulla 2017, "Production Friendly Microfacet Sheen BRDF"
     float invAlpha  = 1.0 / linearRoughness;
@@ -173,7 +162,7 @@ float distribution(float linearRoughness, float NoH, const vec3 h) {
 #endif
 }
 
-float visibility(float roughness, float linearRoughness, float NoV, float NoL, float LoH) {
+float visibility(float linearRoughness, float NoV, float NoL, float LoH) {
 #if BRDF_SPECULAR_V == SPECULAR_V_SMITH_GGX
     return V_SmithGGXCorrelated(linearRoughness, NoV, NoL);
 #elif BRDF_SPECULAR_V == SPECULAR_V_SMITH_GGX_FAST
@@ -220,9 +209,7 @@ float visibilityClearCoat(float roughness, float linearRoughness, float LoH) {
 }
 
 float distributionCloth(float linearRoughness, float NoH) {
-#if BRDF_CLOTH_D == SPECULAR_D_ASHIKHMIN
-    return D_Ashikhmin(linearRoughness, NoH);
-#elif BRDF_CLOTH_D == SPECULAR_D_CHARLIE
+#if BRDF_CLOTH_D == SPECULAR_D_CHARLIE
     return D_Charlie(linearRoughness, NoH);
 #endif
 }

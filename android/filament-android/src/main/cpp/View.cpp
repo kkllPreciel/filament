@@ -123,6 +123,34 @@ Java_com_google_android_filament_View_nGetAntiAliasing(JNIEnv*, jclass,
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_google_android_filament_View_nSetToneMapping(JNIEnv*, jclass,
+        jlong nativeView, jint type) {
+    View* view = (View*) nativeView;
+    view->setToneMapping(View::ToneMapping(type));
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_google_android_filament_View_nGetToneMapping(JNIEnv*, jclass,
+        jlong nativeView) {
+    View* view = (View*) nativeView;
+    return (jint) view->getToneMapping();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_google_android_filament_View_nSetDithering(JNIEnv*, jclass,
+        jlong nativeView, jint dithering) {
+    View* view = (View*) nativeView;
+    view->setDithering((View::Dithering) dithering);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_google_android_filament_View_nGetDithering(JNIEnv*, jclass,
+        jlong nativeView) {
+    View* view = (View*) nativeView;
+    return (jint)view->getDithering();
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_google_android_filament_View_nSetDynamicResolutionOptions(JNIEnv*,
         jclass, jlong nativeView, jboolean enabled, jboolean homogeneousScaling,
         jfloat targetFrameTimeMilli, jfloat headRoomRatio, jfloat scaleRate,
@@ -134,8 +162,8 @@ Java_com_google_android_filament_View_nSetDynamicResolutionOptions(JNIEnv*,
     options.targetFrameTimeMilli = targetFrameTimeMilli;
     options.headRoomRatio = headRoomRatio;
     options.scaleRate = scaleRate;
-    options.minScale = math::float2{minScale};
-    options.maxScale = math::float2{maxScale};
+    options.minScale = filament::math::float2{minScale};
+    options.maxScale = filament::math::float2{maxScale};
     options.history = (uint8_t) history;
     view->setDynamicResolutionOptions(options);
 }
