@@ -98,7 +98,15 @@ public class MaterialBuilder {
         UV0,                    // texture coordinates (float2)
         UV1,                    // texture coordinates (float2)
         BONE_INDICES,           // indices of 4 bones (uvec4)
-        BONE_WEIGHTS            // weights of the 4 bones (normalized float4)
+        BONE_WEIGHTS,           // weights of the 4 bones (normalized float4)
+        CUSTOM0,
+        CUSTOM1,
+        CUSTOM2,
+        CUSTOM3,
+        CUSTOM4,
+        CUSTOM5,
+        CUSTOM6,
+        CUSTOM7
     }
 
     public enum BlendingMode {
@@ -107,8 +115,10 @@ public class MaterialBuilder {
                                 // affects diffuse lighting only
         ADD,                    // material is additive (e.g.: hologram)
         MASKED,                 // material is masked (i.e. alpha tested)
-        FADE                    // material is transparent and color is alpha-pre-multiplied,
+        FADE,                   // material is transparent and color is alpha-pre-multiplied,
                                 // affects specular lighting
+        MULTIPLY,               // material darkens what's behind it
+        SCREN                   // material brightens what's behind it
     }
 
     public enum VertexDomain {
@@ -142,9 +152,16 @@ public class MaterialBuilder {
     }
 
     public enum TargetApi {
-        ALL,
-        OPENGL,
-        VULKAN,
+        OPENGL      (0x1),
+        VULKAN      (0x2),
+        METAL       (0x4),
+        ALL         (0x7);
+
+        final int number;
+
+        private TargetApi(int number) {
+            this.number = number;
+        }
     }
 
     public enum Optimization {
@@ -290,14 +307,20 @@ public class MaterialBuilder {
     }
 
     @NonNull
-    public MaterialBuilder curvatureToRoughness(boolean curvatureToRoughness) {
-        nMaterialBuilderCurvatureToRoughness(mNativeObject, curvatureToRoughness);
+    public MaterialBuilder specularAntiAliasing(boolean specularAntiAliasing) {
+        nMaterialBuilderSpecularAntiAliasing(mNativeObject, specularAntiAliasing);
         return this;
     }
 
     @NonNull
-    public MaterialBuilder limitOverInterpolation(boolean limitOverInterpolation) {
-        nMaterialBuilderLimitOverInterpolation(mNativeObject, limitOverInterpolation);
+    public MaterialBuilder specularAntiAliasingVariance(float variance) {
+        nMaterialBuilderSpecularAntiAliasingVariance(mNativeObject, variance);
+        return this;
+    }
+
+    @NonNull
+    public MaterialBuilder specularAntiAliasingThreshold(float threshold) {
+        nMaterialBuilderSpecularAntiAliasingThreshold(mNativeObject, threshold);
         return this;
     }
 
@@ -310,6 +333,18 @@ public class MaterialBuilder {
     @NonNull
     public MaterialBuilder flipUV(boolean flipUV) {
         nMaterialBuilderFlipUV(mNativeObject, flipUV);
+        return this;
+    }
+
+    @NonNull
+    public MaterialBuilder multiBounceAmbientOcclusion(boolean multiBounceAO) {
+        nMaterialBuilderMultiBounceAmbientOcclusion(mNativeObject, multiBounceAO);
+        return this;
+    }
+
+    @NonNull
+    public MaterialBuilder specularAmbientOcclusion(boolean specularAO) {
+        nMaterialBuilderSpecularAmbientOcclusion(mNativeObject, specularAO);
         return this;
     }
 
@@ -327,7 +362,7 @@ public class MaterialBuilder {
 
     @NonNull
     public MaterialBuilder targetApi(@NonNull TargetApi api) {
-        nMaterialBuilderTargetApi(mNativeObject, api.ordinal());
+        nMaterialBuilderTargetApi(mNativeObject, api.number);
         return this;
     }
 
@@ -408,13 +443,19 @@ public class MaterialBuilder {
 
     private static native void nMaterialBuilderShadowMultiplier(long mNativeObject,
             boolean shadowMultiplier);
-    private static native void nMaterialBuilderCurvatureToRoughness(long mNativeObject,
-            boolean curvatureToRoughness);
-    private static native void nMaterialBuilderLimitOverInterpolation(long mNativeObject,
-            boolean limitOverInterpolation);
+    private static native void nMaterialBuilderSpecularAntiAliasing(long mNativeObject,
+            boolean specularAntiAliasing);
+    private static native void nMaterialBuilderSpecularAntiAliasingVariance(long mNativeObject,
+            float variance);
+    private static native void nMaterialBuilderSpecularAntiAliasingThreshold(long mNativeObject,
+            float threshold);
     private static native void nMaterialBuilderClearCoatIorChange(long mNativeObject,
             boolean clearCoatIorChange);
     private static native void nMaterialBuilderFlipUV(long nativeBuilder, boolean flipUV);
+    private static native void nMaterialBuilderMultiBounceAmbientOcclusion(long nativeBuilder,
+            boolean multiBounceAO);
+    private static native void nMaterialBuilderSpecularAmbientOcclusion(long nativeBuilder,
+            boolean specularAO);
     private static native void nMaterialBuilderTransparencyMode(long nativeBuilder, int mode);
     private static native void nMaterialBuilderPlatform(long nativeBuilder, int platform);
     private static native void nMaterialBuilderTargetApi(long nativeBuilder, int api);

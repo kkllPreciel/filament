@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 project(filament C ASM)
 
 set(TARGET backend)
@@ -61,6 +61,7 @@ if (NOT USE_EXTERNAL_GLES3)
             src/opengl/OpenGLBlitter.h
             src/opengl/OpenGLDriver.cpp
             src/opengl/OpenGLDriver.h
+            src/opengl/OpenGLDriverFactory.h
             src/opengl/OpenGLProgram.cpp
             src/opengl/OpenGLProgram.h
             src/opengl/OpenGLPlatform.cpp
@@ -73,6 +74,7 @@ if (NOT USE_EXTERNAL_GLES3)
         list(APPEND SRCS src/opengl/PlatformEGL.cpp)
     elseif (IOS)
         list(APPEND SRCS src/opengl/PlatformCocoaTouchGL.mm)
+        list(APPEND SRCS src/opengl/CocoaTouchExternalImage.mm)
     elseif (APPLE)
         list(APPEND SRCS src/opengl/PlatformCocoaGL.mm)
     elseif (WEBGL)
@@ -92,6 +94,7 @@ endif()
 
 if (FILAMENT_SUPPORTS_METAL)
     list(APPEND SRCS
+            src/metal/MetalBlitter.mm
             src/metal/MetalBufferPool.mm
             src/metal/MetalContext.mm
             src/metal/MetalDriver.mm
@@ -120,6 +123,7 @@ if (FILAMENT_SUPPORTS_VULKAN)
             src/vulkan/VulkanDisposer.h
             src/vulkan/VulkanDriver.cpp
             src/vulkan/VulkanDriver.h
+            src/vulkan/VulkanDriverFactory.h
             src/vulkan/VulkanFboCache.cpp
             src/vulkan/VulkanFboCache.h
             src/vulkan/VulkanHandles.cpp

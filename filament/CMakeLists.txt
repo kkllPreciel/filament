@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 project(filament C ASM)
 
 set(TARGET filament)
@@ -26,6 +26,7 @@ set(PUBLIC_HDRS
         include/filament/Material.h
         include/filament/MaterialInstance.h
         include/filament/RenderableManager.h
+        include/filament/RenderTarget.h
         include/filament/Renderer.h
         include/filament/Scene.h
         include/filament/Skybox.h
@@ -68,6 +69,7 @@ set(SRCS
         src/Renderer.cpp
         src/RenderPass.cpp
         src/RenderPrimitive.cpp
+        src/RenderTarget.cpp
         src/Scene.cpp
         src/ShadowMap.cpp
         src/Skybox.cpp
@@ -103,6 +105,7 @@ set(PRIVATE_HDRS
         src/details/MaterialInstance.h
         src/details/RenderPrimitive.h
         src/details/Renderer.h
+        src/details/RenderTarget.h
         src/details/ResourceList.h
         src/details/Scene.h
         src/details/ShadowMap.h
@@ -124,8 +127,11 @@ set(PRIVATE_HDRS
 
 set(MATERIAL_SRCS
         src/materials/defaultMaterial.mat
+        src/materials/blur.mat
+        src/materials/mipmapDepth.mat
         src/materials/skybox.mat
-        src/materials/skyboxRGBM.mat
+        src/materials/sao.mat
+        src/materials/ssao.mat
 )
 
 # Embed the binary resource blob for materials.
@@ -134,10 +140,25 @@ list(APPEND PRIVATE_HDRS ${RESGEN_HEADER})
 list(APPEND SRCS ${RESGEN_SOURCE})
 
 # ==================================================================================================
+# Configuration
+# ==================================================================================================
+
+# Size of the DFG lookup table
+if (NOT DFG_LUT_SIZE)
+    if (IS_MOBILE_TARGET)
+        set(DFG_LUT_SIZE 64)
+    else()
+        set(DFG_LUT_SIZE 128)
+    endif()
+endif()
+message(STATUS "DFG LUT size set to ${DFG_LUT_SIZE}x${DFG_LUT_SIZE}")
+
+# ==================================================================================================
 # Definitions
 # ==================================================================================================
 # "2" corresponds to SYSTRACE_TAG_FILEMENT (See: utils/Systrace.h)
-add_definitions(-DSYSTRACE_TAG=2 )
+add_definitions(-DSYSTRACE_TAG=2)
+add_definitions(-DFILAMENT_DFG_LUT_SIZE=${DFG_LUT_SIZE})
 
 # ==================================================================================================
 # Generate all .filamat: default material, skyboxes, and post-process
@@ -150,25 +171,6 @@ endif()
 set(MATERIAL_BINS)
 file(MAKE_DIRECTORY ${MATERIAL_DIR})
 
-# Target system.
-if (ANDROID OR WEBGL OR IOS)
-    set(MATC_TARGET mobile)
-else()
-    set(MATC_TARGET desktop)
-endif()
-
-# Generate shader code for all platforms when Vulkan or Metal is supported.
-if (FILAMENT_SUPPORTS_VULKAN OR FILAMENT_SUPPORTS_METAL)
-    set(MATC_BASE_FLAGS -a all)
-else()
-    set(MATC_BASE_FLAGS -a opengl)
-endif()
-
-# Only optimize materials in Release mode (so error message lines match the source code)
-if (NOT CMAKE_BUILD_TYPE MATCHES Release)
-    set(MATC_OPT_FLAGS -g)
-endif()
-
 foreach (mat_src ${MATERIAL_SRCS})
     get_filename_component(localname "${mat_src}" NAME_WE)
     get_filename_component(fullname "${mat_src}" ABSOLUTE)
@@ -176,8 +178,7 @@ foreach (mat_src ${MATERIAL_SRCS})
 
     add_custom_command(
             OUTPUT ${output_path}
-            COMMAND matc ${MATC_BASE_FLAGS} ${MATC_OPT_FLAGS} -p ${MATC_TARGET} -m material
-                    -o ${output_path} ${fullname}
+            COMMAND matc ${MATC_BASE_FLAGS} -m material -o ${output_path} ${fullname}
             DEPENDS ${fullname} matc
             COMMENT "Compiling material ${mat_src} to ${output_path}"
     )
@@ -187,8 +188,7 @@ endforeach()
 set(output_path "${MATERIAL_DIR}/postprocess.filamat")
 add_custom_command(
         OUTPUT ${output_path}
-        COMMAND matc ${MATC_BASE_FLAGS} ${MATC_OPT_FLAGS} -p ${MATC_TARGET} -m postprocess
-                -o ${output_path}
+        COMMAND matc ${MATC_BASE_FLAGS} -m postprocess -o ${output_path}
         DEPENDS matc
         COMMENT "Compiling post-process material ${output_path}"
 )
@@ -211,7 +211,7 @@ file(MAKE_DIRECTORY "${GENERATION_ROOT}/generated/data/")
 set(output_path "${GENERATION_ROOT}/generated/data/dfg.inc")
 add_custom_command(
         OUTPUT ${output_path}
-        COMMAND cmgen --quiet --ibl-dfg-multiscatter --ibl-dfg-cloth --ibl-dfg=${output_path}
+        COMMAND cmgen --quiet --size=${DFG_LUT_SIZE} --ibl-dfg-multiscatter --ibl-dfg-cloth --ibl-dfg=${output_path}
         DEPENDS cmgen
         COMMENT "Generating DFG LUT ${output_path}"
 )
@@ -250,6 +250,7 @@ target_link_libraries(${TARGET} PUBLIC geometry) # TODO: remove this dependency 
 target_link_libraries(${TARGET} PUBLIC filaflat)
 target_link_libraries(${TARGET} PUBLIC filabridge)
 target_link_libraries(${TARGET} PUBLIC image_headers)
+target_link_libraries(${TARGET} PUBLIC ibl)
 
 # Android, iOS, and WebGL do not use bluegl.
 if(NOT IOS AND NOT ANDROID AND NOT WEBGL)
@@ -339,3 +340,4 @@ install(FILES "README.md" DESTINATION .)
 add_subdirectory(backend)
 add_subdirectory(test)
 add_subdirectory(benchmark)
+add_subdirectory(tools)

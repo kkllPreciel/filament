@@ -252,9 +252,11 @@ const char* toString(BlendingMode blendingMode) {
     switch (blendingMode) {
         case BlendingMode::OPAQUE: return "opaque";
         case BlendingMode::TRANSPARENT: return "transparent";
-        case BlendingMode::FADE: return "fade";
         case BlendingMode::ADD: return "add";
         case BlendingMode::MASKED: return "masked";
+        case BlendingMode::FADE: return "fade";
+        case BlendingMode::MULTIPLY: return "multiply";
+        case BlendingMode::SCREEN: return "screen";
     }
 }
 
@@ -305,6 +307,14 @@ const char* toString(VertexAttribute attribute) {
         case VertexAttribute::UV1: return "uv1";
         case VertexAttribute::BONE_INDICES: return "bone indices";
         case VertexAttribute::BONE_WEIGHTS: return "bone weights";
+        case VertexAttribute::CUSTOM0: return "custom0";
+        case VertexAttribute::CUSTOM1: return "custom1";
+        case VertexAttribute::CUSTOM2: return "custom2";
+        case VertexAttribute::CUSTOM3: return "custom3";
+        case VertexAttribute::CUSTOM4: return "custom4";
+        case VertexAttribute::CUSTOM5: return "custom5";
+        case VertexAttribute::CUSTOM6: return "custom6";
+        case VertexAttribute::CUSTOM7: return "custom7";
     }
     return "--";
 }
@@ -449,8 +459,9 @@ static bool printMaterial(const ChunkContainer& container) {
     printChunk<Interpolation, uint8_t>(container, filamat::MaterialInterpolation,
             "Interpolation: ");
     printChunk<bool, bool>(container, filamat::MaterialShadowMultiplier, "Shadow multiply: ");
-    printChunk<bool, bool>(container, filamat::MaterialCurvatureToRoughness, "Curvature to roughness: ");
-    printChunk<bool, bool>(container, filamat::MaterialLimitOverInterpolation, "Limit interpolation: ");
+    printChunk<bool, bool>(container, filamat::MaterialSpecularAntiAliasing, "Specular anti-aliasing: ");
+    printFloatChunk(container, filamat::MaterialSpecularAntiAliasingVariance, "    Variance: ");
+    printFloatChunk(container, filamat::MaterialSpecularAntiAliasingThreshold, "    Threshold: ");
     printChunk<bool, bool>(container, filamat::MaterialClearCoatIorChange, "Clear coat IOR change: ");
 
     std::cout << std::endl;
@@ -462,10 +473,8 @@ static bool printMaterial(const ChunkContainer& container) {
     printChunk<bool, bool>(container, filamat::MaterialDepthWrite, "Depth write: ");
     printChunk<bool, bool>(container, filamat::MaterialDepthTest, "Depth test: ");
     printChunk<bool, bool>(container, filamat::MaterialDoubleSided, "Double sided: ");
-    printChunk<CullingMode, uint8_t>(container, filamat::MaterialCullingMode,
-            "Culling: ");
-    printChunk<TransparencyMode, uint8_t>(container, filamat::MaterialTransparencyMode,
-            "Transparency: ");
+    printChunk<CullingMode, uint8_t>(container, filamat::MaterialCullingMode, "Culling: ");
+    printChunk<TransparencyMode, uint8_t>(container, filamat::MaterialTransparencyMode, "Transparency: ");
 
     std::cout << std::endl;
 
@@ -966,7 +975,7 @@ static bool parseChunks(Config config, void* data, size_t size) {
 
             const auto& item = info[config.shaderIndex];
             parser.getShader(item.shaderModel, item.variant, item.pipelineStage, builder);
-            std::cout << builder.data();
+            std::cout << (const char*) builder.data();
 
             return true;
         }

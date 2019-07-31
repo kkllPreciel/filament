@@ -19,6 +19,7 @@
 #include "CommandStreamDispatcher.h"
 
 #include "VulkanBuffer.h"
+#include "VulkanDriverFactory.h"
 #include "VulkanHandles.h"
 #include "VulkanPlatform.h"
 
@@ -46,7 +47,11 @@
 // } } }
 //
 // Validation crashes on MoltenVK, so we disable it by default on MacOS.
-#define ENABLE_VALIDATION (!defined(NDEBUG) && !defined(__APPLE__))
+#if !defined(NDEBUG) && !defined(__APPLE__)
+#define ENABLE_VALIDATION 1
+#else
+#define ENABLE_VALIDATION 0
+#endif
 
 #if ENABLE_VALIDATION
 
@@ -71,6 +76,11 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugReportCallback(VkDebugReportFlagsEXT flags,
 
 namespace filament {
 namespace backend {
+
+Driver* VulkanDriverFactory::create(VulkanPlatform* const platform,
+        const char* const* ppEnabledExtensions, uint32_t enabledExtensionCount) noexcept {
+    return VulkanDriver::create(platform, ppEnabledExtensions, enabledExtensionCount);
+}
 
 VulkanDriver::VulkanDriver(VulkanPlatform* platform,
         const char* const* ppEnabledExtensions, uint32_t enabledExtensionCount) noexcept :
@@ -173,6 +183,7 @@ VulkanDriver::VulkanDriver(VulkanPlatform* platform,
 
 VulkanDriver::~VulkanDriver() noexcept = default;
 
+UTILS_NOINLINE
 Driver* VulkanDriver::create(VulkanPlatform* const platform,
         const char* const* ppEnabledExtensions, uint32_t enabledExtensionCount) noexcept {
     assert(platform);
@@ -380,29 +391,17 @@ void VulkanDriver::createDefaultRenderTargetR(Handle<HwRenderTarget> rth, int) {
 
 void VulkanDriver::createRenderTargetR(Handle<HwRenderTarget> rth,
         TargetBufferFlags targets, uint32_t width, uint32_t height, uint8_t samples,
-        TextureFormat format, TargetBufferInfo color, TargetBufferInfo depth,
+        TargetBufferInfo color, TargetBufferInfo depth,
         TargetBufferInfo stencil) {
     auto renderTarget = construct_handle<VulkanRenderTarget>(mHandleMap, rth, mContext,
             width, height, color.level);
     if (color.handle) {
         auto colorTexture = handle_cast<VulkanTexture>(mHandleMap, color.handle);
-        renderTarget->setColorImage({
-            .image = colorTexture->textureImage,
-            .view = colorTexture->imageView,
-            .format = colorTexture->vkformat
-        });
-    } else if (targets & TargetBufferFlags::COLOR) {
-        renderTarget->createColorImage(getVkFormat(format));
+        renderTarget->setColorImage(colorTexture);
     }
     if (depth.handle) {
         auto depthTexture = handle_cast<VulkanTexture>(mHandleMap, depth.handle);
-        renderTarget->setDepthImage({
-            .image = depthTexture->textureImage,
-            .view = depthTexture->imageView,
-            .format = depthTexture->vkformat
-        });
-    } else if (targets & TargetBufferFlags::DEPTH) {
-        renderTarget->createDepthImage(mContext.depthFormat);
+        renderTarget->setDepthImage(depthTexture);
     }
     mDisposer.createDisposable(renderTarget, [this, rth] () {
         destruct_handle<VulkanRenderTarget>(mHandleMap, rth);
@@ -576,6 +575,10 @@ FenceStatus VulkanDriver::wait(Handle<HwFence> fh, uint64_t timeout) {
 bool VulkanDriver::isTextureFormatSupported(TextureFormat format) {
     assert(mContext.physicalDevice);
     VkFormat vkformat = getVkFormat(format);
+    // We automatically use an alternative format when the client requests DEPTH24.
+    if (format == TextureFormat::DEPTH24) {
+        vkformat = mContext.depthFormat;
+    }
     if (vkformat == VK_FORMAT_UNDEFINED) {
         return false;
     }
@@ -587,6 +590,10 @@ bool VulkanDriver::isTextureFormatSupported(TextureFormat format) {
 bool VulkanDriver::isRenderTargetFormatSupported(TextureFormat format) {
     assert(mContext.physicalDevice);
     VkFormat vkformat = getVkFormat(format);
+    // We automatically use an alternative format when the client requests DEPTH24.
+    if (format == TextureFormat::DEPTH24) {
+        vkformat = mContext.depthFormat;
+    }
     if (vkformat == VK_FORMAT_UNDEFINED) {
         return false;
     }
@@ -671,13 +678,15 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth,
     const VkExtent2D extent = rt->getExtent();
     assert(extent.width > 0 && extent.height > 0);
 
-    mDisposer.acquire(rt, mContext.currentCommands->resources);
-
     const auto color = rt->getColor();
     const auto depth = rt->getDepth();
     const bool hasColor = color.format != VK_FORMAT_UNDEFINED;
     const bool hasDepth = depth.format != VK_FORMAT_UNDEFINED;
     const bool depthOnly = hasDepth && !hasColor;
+
+    mDisposer.acquire(rt, mContext.currentCommands->resources);
+    mDisposer.acquire(color.offscreen, mContext.currentCommands->resources);
+    mDisposer.acquire(depth.offscreen, mContext.currentCommands->resources);
 
     VkImageLayout finalLayout;
     if (!rt->isOffscreen()) {
@@ -771,10 +780,6 @@ void VulkanDriver::endRenderPass(int) {
 void VulkanDriver::discardSubRenderTargetBuffers(Handle<HwRenderTarget> rth,
         TargetBufferFlags buffers,
         uint32_t left, uint32_t bottom, uint32_t width, uint32_t height) {
-}
-
-void VulkanDriver::resizeRenderTarget(Handle<HwRenderTarget> rth,
-        uint32_t width, uint32_t height) {
 }
 
 void VulkanDriver::setRenderPrimitiveBuffer(Handle<HwRenderPrimitive> rph,

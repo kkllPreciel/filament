@@ -130,6 +130,7 @@ FEngine::FEngine(Backend backend, Platform* platform, void* sharedGLContext) :
         mBackend(backend),
         mPlatform(platform),
         mSharedGLContext(sharedGLContext),
+        mPostProcessManager(*this),
         mEntityManager(EntityManager::get()),
         mRenderableManager(*this),
         mTransformManager(),
@@ -197,13 +198,12 @@ void FEngine::init() {
     mDefaultIblTexture = upcast(Texture::Builder()
             .width(1).height(1).levels(1)
             .format(Texture::InternalFormat::RGBA8)
-            .rgbm(true)
             .sampler(Texture::Sampler::SAMPLER_CUBEMAP)
             .build(*this));
     static uint32_t pixel = 0;
     Texture::PixelBufferDescriptor buffer(
-            &pixel, 4, // 4 bytes in 1 RGBM pixel
-            Texture::Format::RGBM, Texture::Type::UBYTE);
+            &pixel, 4, // 4 bytes in 1 RGBA pixel
+            Texture::Format::RGBA, Texture::Type::UBYTE);
     Texture::FaceOffsets offsets = {};
     mDefaultIblTexture->setImage(*this, 0, std::move(buffer), offsets);
 
@@ -215,15 +215,15 @@ void FEngine::init() {
             .intensity(1.0f)
             .build(*this));
 
-    mPostProcessManager.init(*this);
-    mLightManager.init(*this);
-    mDFG.reset(new DFG(*this));
-
     // Always initialize the default material, most materials' depth shaders fallback on it.
     mDefaultMaterial = upcast(
             FMaterial::DefaultMaterialBuilder()
                     .package(MATERIALS_DEFAULTMATERIAL_DATA, MATERIALS_DEFAULTMATERIAL_SIZE)
                     .build(*const_cast<FEngine*>(this)));
+
+    mPostProcessManager.init();
+    mLightManager.init(*this);
+    mDFG.reset(new DFG(*this));
 }
 
 FEngine::~FEngine() noexcept {
@@ -277,13 +277,12 @@ void FEngine::shutdown() {
     cleanupResourceList(mSkyboxes);
 
     // this must be done after Skyboxes and before materials
-    for (FMaterial const* material : mSkyboxMaterials) {
-        destroy(material);
-    }
+    destroy(mSkyboxMaterial);
 
     cleanupResourceList(mIndexBuffers);
     cleanupResourceList(mVertexBuffers);
     cleanupResourceList(mTextures);
+    cleanupResourceList(mRenderTargets);
     cleanupResourceList(mMaterials);
     for (auto& item : mMaterialInstances) {
         cleanupResourceList(item.second);
@@ -320,15 +319,16 @@ void FEngine::prepare() {
     // prepare() is called once per Renderer frame. Ideally we would upload the content of
     // UBOs that are visible only. It's not such a big issue because the actual upload() is
     // skipped is the UBO hasn't changed. Still we could have a lot of these.
+    FEngine::DriverApi& driver = getDriverApi();
     for (auto& materialInstanceList : mMaterialInstances) {
         for (auto& item : materialInstanceList.second) {
-            item->commit(*this);
+            item->commit(driver);
         }
     }
 
     // Commit default material instances.
     for (auto& material : mMaterials) {
-        material->getDefaultInstance()->commit(*this);
+        material->getDefaultInstance()->commit(driver);
     }
 }
 
@@ -426,12 +426,11 @@ void FEngine::flushCommandBuffer(CommandBufferQueue& commandQueue) {
     commandQueue.flush();
 }
 
-const FMaterial* FEngine::getSkyboxMaterial(bool rgbm) const noexcept {
-    size_t index = rgbm ? 0 : 1;
-    FMaterial const* material = mSkyboxMaterials[index];
+const FMaterial* FEngine::getSkyboxMaterial() const noexcept {
+    FMaterial const* material = mSkyboxMaterial;
     if (UTILS_UNLIKELY(material == nullptr)) {
-        material = FSkybox::createMaterial(*const_cast<FEngine*>(this), rgbm);
-        mSkyboxMaterials[index] = material;
+        material = FSkybox::createMaterial(*const_cast<FEngine*>(this));
+        mSkyboxMaterial = material;
     }
     return material;
 }
@@ -537,6 +536,10 @@ FSkybox* FEngine::createSkybox(const Skybox::Builder& builder) noexcept {
 
 FStream* FEngine::createStream(const Stream::Builder& builder) noexcept {
     return create(mStreams, builder);
+}
+
+FRenderTarget* FEngine::createRenderTarget(const RenderTarget::Builder& builder) noexcept {
+    return create(mRenderTargets, builder);
 }
 
 /*
@@ -695,6 +698,10 @@ void FEngine::destroy(const FTexture* p) {
     terminateAndDestroy(p, mTextures);
 }
 
+void FEngine::destroy(const FRenderTarget* p) {
+    terminateAndDestroy(p, mRenderTargets);
+}
+
 inline void FEngine::destroy(const FView* p) {
     terminateAndDestroy(p, mViews);
 }
@@ -717,7 +724,7 @@ void FEngine::destroy(const FStream* p) {
 }
 
 
-inline void FEngine::destroy(const FMaterial* ptr) {
+void FEngine::destroy(const FMaterial* ptr) {
     if (ptr != nullptr) {
         auto pos = mMaterialInstances.find(ptr);
         if (pos != mMaterialInstances.cend()) {
@@ -732,7 +739,7 @@ inline void FEngine::destroy(const FMaterial* ptr) {
     }
 }
 
-inline void FEngine::destroy(const FMaterialInstance* ptr) {
+void FEngine::destroy(const FMaterialInstance* ptr) {
     if (ptr != nullptr) {
         auto pos = mMaterialInstances.find(ptr->getMaterial());
         assert(pos != mMaterialInstances.cend());
@@ -795,6 +802,10 @@ Engine* Engine::create(Backend backend, Platform* platform, void* sharedGLContex
     Engine* handle = engine.get();
     sEngines[handle] = std::move(engine);
     return handle;
+}
+
+void Engine::destroy(Engine* engine) {
+    destroy(&engine);
 }
 
 void Engine::destroy(Engine** engine) {
@@ -903,6 +914,10 @@ void Engine::destroy(const Stream* p) {
 }
 
 void Engine::destroy(const Texture* p) {
+    upcast(this)->destroy(upcast(p));
+}
+
+void Engine::destroy(const RenderTarget* p) {
     upcast(this)->destroy(upcast(p));
 }
 

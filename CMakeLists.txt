@@ -1,7 +1,7 @@
 # ==================================================================================================
 # CMake
 # ==================================================================================================
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 
 # ==================================================================================================
 # Project declaration
@@ -18,11 +18,17 @@ option(USE_EXTERNAL_GLES3 "Experimental: Compile Filament against OpenGL ES 3" O
 
 option(GENERATE_JS_DOCS "Build WebGL documentation and tutorials" OFF)
 
+option(ENABLE_LTO "Enable link-time optimizations if supported by the compiler" OFF)
+
 # ==================================================================================================
 # OS specific
 # ==================================================================================================
 if (UNIX AND NOT APPLE AND NOT ANDROID AND NOT WEBGL)
     set(LINUX TRUE)
+endif()
+
+if (ANDROID OR WEBGL OR IOS)
+    set(IS_MOBILE_TARGET TRUE)
 endif()
 
 if (WIN32)
@@ -60,6 +66,30 @@ if (WIN32)
 endif()
 
 # ==================================================================================================
+# Check if embree is available.
+# This is an optional dependency and can be installed with homebrew, apt-get, etc.
+# ==================================================================================================
+
+find_package(embree 3.0 QUIET PATHS /usr/lib64/cmake)
+if (embree_FOUND AND NOT ANDROID)
+    message("Found embree in ${embree_DIR}")
+    set(MKLDNN_THREADING "TBB")
+    include(third_party/OpenImageDenoise/cmake/resource.cmake)
+    include(third_party/OpenImageDenoise/mkl-dnn/cmake/Threading.cmake)
+    include(third_party/OpenImageDenoise/mkl-dnn/cmake/TBB.cmake)
+    find_package(TBB QUIET)
+    if (TBB_FOUND AND "${TBB_VERSION_MAJOR}" VERSION_EQUAL 2019)
+        message("Found TBB ${TBB_VERSION}")
+        add_definitions(-DFILAMENT_HAS_EMBREE)
+        set(DENOISE_LIBRARY OpenImageDenoise)
+    else()
+        message("TBB 2019 not found.")
+    endif()
+else()
+    message("Embree not found, pipeline features are disabled.")
+endif()
+
+# ==================================================================================================
 #  Paths
 # ==================================================================================================
 # Where our external libs are
@@ -77,7 +107,7 @@ set(TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 # ==================================================================================================
 # Compiler check
 # ==================================================================================================
-set(MIN_CLANG_VERSION "5.0")
+set(MIN_CLANG_VERSION "6.0")
 
 if (CMAKE_C_COMPILER_ID MATCHES "Clang")
     if (CMAKE_C_COMPILER_VERSION VERSION_LESS MIN_CLANG_VERSION)
@@ -101,6 +131,20 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" AND "${CMAKE_CXX_SIMULATE_ID}" S
 endif()
 
 # ==================================================================================================
+# Link time optimizations (LTO)
+# ==================================================================================================
+if (ENABLE_LTO)
+    include(CheckIPOSupported)
+
+    check_ipo_supported(RESULT IPO_SUPPORT)
+
+    if (IPO_SUPPORT)
+        message(STATUS "LTO support is enabled")
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+endif()
+
+# ==================================================================================================
 # General compiler flags
 # ==================================================================================================
 set(CXX_STANDARD "-std=c++14")
@@ -120,18 +164,9 @@ endif()
 
 if (LINUX)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
-    if (FILAMENT_REQUIRES_CXXABI)
-        # Required in CI environment with custom libc++ and libc++abi
-        link_libraries(libc++abi.a)
-    endif()
-    # To distribute our binaries, we must remove the dependency on libc++ and libgcc.
-    if (CMAKE_BUILD_TYPE STREQUAL "Release")
-        link_libraries("-static-libgcc -static-libstdc++")
-    endif()
-else()
-    if (FILAMENT_REQUIRES_CXXABI)
-        message("The option FILAMENT_REQUIRES_CXXABI is unsupported on this platform")
-    endif()
+    link_libraries("-static-libgcc -static-libstdc++")
+    link_libraries(libc++.a)
+    link_libraries(libc++abi.a)
 endif()
 
 if (CYGWIN)
@@ -246,6 +281,36 @@ else()
 endif()
 
 # ==================================================================================================
+# Material compilation flags
+# ==================================================================================================
+
+# Target system.
+if (IS_MOBILE_TARGET)
+    set(MATC_TARGET mobile)
+else()
+    set(MATC_TARGET desktop)
+endif()
+
+set(MATC_API_FLAGS )
+
+# TODO: Add a flag to build Filament without support for OpenGL.
+set(MATC_API_FLAGS ${MATC_API_FLAGS} -a opengl)
+
+if (FILAMENT_SUPPORTS_VULKAN)
+    set(MATC_API_FLAGS ${MATC_API_FLAGS} -a vulkan)
+endif()
+if (FILAMENT_SUPPORTS_METAL)
+    set(MATC_API_FLAGS ${MATC_API_FLAGS} -a metal)
+endif()
+
+# Only optimize materials in Release mode (so error message lines match the source code)
+if (NOT CMAKE_BUILD_TYPE MATCHES Release)
+    set(MATC_OPT_FLAGS -g)
+endif()
+
+set(MATC_BASE_FLAGS ${MATC_API_FLAGS} -p ${MATC_TARGET} ${MATC_OPT_FLAGS})
+
+# ==================================================================================================
 # Distribution
 # ==================================================================================================
 # choose where to put the objects in the dist folder
@@ -312,7 +377,9 @@ function(get_resgen_vars ARCHIVE_DIR ARCHIVE_NAME)
         ${ARCHIVE_DIR}/${ARCHIVE_NAME}.apple.S
         ${ARCHIVE_DIR}/${ARCHIVE_NAME}.h
     )
-    set(ASM_ARCH_FLAG "-arch ${DIST_ARCH}")
+    if (IOS)
+        set(ASM_ARCH_FLAG "-arch ${DIST_ARCH}")
+    endif()
     if (APPLE)
         set(ASM_SUFFIX ".apple")
     endif()
@@ -344,6 +411,7 @@ add_subdirectory(${LIBRARIES}/geometry)
 add_subdirectory(${LIBRARIES}/gltfio)
 add_subdirectory(${LIBRARIES}/ibl)
 add_subdirectory(${LIBRARIES}/image)
+add_subdirectory(${LIBRARIES}/rays)
 add_subdirectory(${LIBRARIES}/math)
 add_subdirectory(${LIBRARIES}/utils)
 add_subdirectory(${FILAMENT}/filament)
@@ -353,6 +421,7 @@ add_subdirectory(${EXTERNAL}/smol-v/tnt)
 add_subdirectory(${EXTERNAL}/benchmark/tnt)
 add_subdirectory(${EXTERNAL}/meshoptimizer)
 add_subdirectory(${EXTERNAL}/cgltf/tnt)
+add_subdirectory(${EXTERNAL}/xatlas/tnt)
 add_subdirectory(${EXTERNAL}/stb/tnt)
 
 if (FILAMENT_BUILD_FILAMAT)
@@ -405,7 +474,6 @@ if (NOT ANDROID AND NOT WEBGL AND NOT IOS)
     add_subdirectory(${EXTERNAL}/libz/tnt)
     add_subdirectory(${EXTERNAL}/skylight/tnt)
     add_subdirectory(${EXTERNAL}/tinyexr/tnt)
-
     add_subdirectory(${TOOLS}/cmgen)
     add_subdirectory(${TOOLS}/filamesh)
     add_subdirectory(${TOOLS}/glslminifier)
@@ -417,6 +485,10 @@ if (NOT ANDROID AND NOT WEBGL AND NOT IOS)
     add_subdirectory(${TOOLS}/roughness-prefilter)
     add_subdirectory(${TOOLS}/skygen)
     add_subdirectory(${TOOLS}/specular-color)
+endif()
+
+if (DENOISE_LIBRARY)
+    add_subdirectory(${EXTERNAL}/OpenImageDenoise/tnt)
 endif()
 
 # Generate exported executables for cross-compiled builds (Android, WebGL, and iOS)

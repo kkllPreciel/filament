@@ -115,6 +115,10 @@ Material* UbershaderLoader::getMaterial(const MaterialKey& config) const {
 
 MaterialInstance* UbershaderLoader::createMaterialInstance(MaterialKey* config, UvMap* uvmap,
         const char* label) {
+    // Diagnostics are not supported with LOAD_UBERSHADERS, please use GENERATE_SHADERS instead.
+    if (config->enableDiagnostics) {
+        return nullptr;
+    }
     gltfio::details::constrainMaterial(config, uvmap);
     auto getUvIndex = [uvmap](uint8_t srcIndex, bool hasTexture) -> int {
         return hasTexture ? int(uvmap->at(srcIndex)) - 1 : -1;
@@ -128,10 +132,6 @@ MaterialInstance* UbershaderLoader::createMaterialInstance(MaterialKey* config, 
             getUvIndex(config->metallicRoughnessUV, config->hasMetallicRoughnessTexture));
     mi->setParameter("aoIndex", getUvIndex(config->aoUV, config->hasOcclusionTexture));
     mi->setParameter("emissiveIndex", getUvIndex(config->emissiveUV, config->hasEmissiveTexture));
-
-    if (config->alphaMode == AlphaMode::MASK) {
-        mi->setMaskThreshold(config->alphaMaskThreshold);
-    }
 
     mi->setDoubleSided(config->doubleSided);
 

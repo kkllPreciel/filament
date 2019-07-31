@@ -26,6 +26,7 @@
 #include "MaterialInfo.h"
 
 #include <utils/CString.h>
+#include <utils/sstream.h>
 
 namespace filamat {
 
@@ -39,7 +40,8 @@ public:
             utils::CString const& materialCode,
             size_t lineOffset,
             utils::CString const& materialVertexCode,
-            size_t vertexLineOffset) noexcept;
+            size_t vertexLineOffset,
+            MaterialBuilder::MaterialDomain materialDomain) noexcept;
 
     const std::string createVertexProgram(filament::backend::ShaderModel sm,
             MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetLanguage targetLanguage,
@@ -66,6 +68,7 @@ public:
 private:
     MaterialBuilder::PropertyList mProperties;
     MaterialBuilder::VariableList mVariables;
+    MaterialBuilder::MaterialDomain mMaterialDomain;
     utils::CString mMaterialCode;
     utils::CString mMaterialVertexCode;
     size_t mMaterialLineOffset;
@@ -73,14 +76,25 @@ private:
 };
 
 struct ShaderPostProcessGenerator {
+    static const std::string createPostProcessVertexProgramOld(filament::backend::ShaderModel sm,
+            MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetLanguage targetLanguage,
+            filament::PostProcessStage variant, uint8_t firstSampler) noexcept;
+    static const std::string createPostProcessFragmentProgramOld(filament::backend::ShaderModel sm,
+            MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetLanguage targetLanguage,
+            filament::PostProcessStage variant, uint8_t firstSampler) noexcept;
+    static void generatePostProcessStageDefines(utils::io::sstream& vs, CodeGenerator const& cg,
+            filament::PostProcessStage variant) noexcept;
+
     static const std::string createPostProcessVertexProgram(filament::backend::ShaderModel sm,
             MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetLanguage targetLanguage,
-            filament::PostProcessStage variant, uint8_t firstSampler) noexcept;
+            MaterialInfo const& material, uint8_t variant,
+            const filament::SamplerBindingMap& samplerBindingMap,
+            utils::CString const& postProcessCode) noexcept;
     static const std::string createPostProcessFragmentProgram(filament::backend::ShaderModel sm,
             MaterialBuilder::TargetApi targetApi, MaterialBuilder::TargetLanguage targetLanguage,
-            filament::PostProcessStage variant, uint8_t firstSampler) noexcept;
-    static void generatePostProcessStageDefines(std::stringstream& vs, CodeGenerator const& cg,
-            filament::PostProcessStage variant) noexcept;
+            MaterialInfo const& material, uint8_t variant,
+            const filament::SamplerBindingMap& samplerBindingMap,
+            utils::CString const& postProcessCode) noexcept;
 };
 
 } // namespace filament

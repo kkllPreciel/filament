@@ -37,10 +37,8 @@ struct VulkanTexture;
 // The render target bundles together a set of attachments, each of which can have one of the
 // following ownership semantics:
 //
-// - The attachment's VkImage is owned by VulkanRenderTarget and is never sampled from; this is
-//   somewhat similar to GL renderbuffer attachment (as opposed to a texture attachment).
-// - The attachment's VkImage is shared and the owner is VulkanSwapChain.
-// - The attachment's VkImage is shared and the owner is VulkanTexture.
+// - The attachment's VkImage is shared and the owner is VulkanSwapChain (mOffScreen = false).
+// - The attachment's VkImage is shared and the owner is VulkanTexture   (mOffScreen = true).
 //
 // We use private inheritance to shield clients from the width / height fields in HwRenderTarget,
 // which are not representative when this is the default render target.
@@ -54,7 +52,6 @@ struct VulkanRenderTarget : private HwRenderTarget {
     explicit VulkanRenderTarget(VulkanContext& context) : HwRenderTarget(0, 0), mContext(context),
             mOffscreen(false), mColorLevel(0) {}
 
-    ~VulkanRenderTarget();
     bool isOffscreen() const { return mOffscreen; }
     void transformClientRectToPlatform(VkRect2D* bounds) const;
     void transformClientRectToPlatform(VkViewport* bounds) const;
@@ -62,18 +59,14 @@ struct VulkanRenderTarget : private HwRenderTarget {
     VulkanAttachment getColor() const;
     VulkanAttachment getDepth() const;
     uint32_t getColorLevel() const { return mColorLevel; }
-    void createColorImage(VkFormat format);
-    void createDepthImage(VkFormat format);
-    void setColorImage(VulkanAttachment c);
-    void setDepthImage(VulkanAttachment d);
+    void setColorImage(VulkanTexture* color);
+    void setDepthImage(VulkanTexture* depth);
 private:
     VulkanAttachment mColor = {};
     VulkanAttachment mDepth = {};
     VulkanContext& mContext;
     bool mOffscreen;
     uint32_t mColorLevel;
-    bool mSharedColorImage = true;
-    bool mSharedDepthImage = true;
 };
 
 struct VulkanSwapChain : public HwSwapChain {

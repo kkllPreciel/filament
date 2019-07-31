@@ -193,8 +193,12 @@ int main(int argc, char** argv) {
 
     auto loadResources = [&app] (utils::Path filename) {
         // Load external textures and buffers.
-        utils::Path assetFolder = filename.getParent();
-        gltfio::ResourceLoader({app.engine, assetFolder, true, false}).loadResources(app.asset);
+        gltfio::ResourceLoader({
+            .engine = app.engine,
+            .gltfPath = filename.getAbsolutePath(),
+            .normalizeSkinningWeights = true,
+            .recomputeBoundingBoxes = false
+        }).loadResources(app.asset);
 
         // Load animation data then free the source hierarchy.
         app.asset->getAnimator();
@@ -203,7 +207,10 @@ int main(int argc, char** argv) {
         // Add the renderables to the scene.
         app.viewer->setAsset(app.asset, app.names, !app.actualSize);
 
-        app.viewer->setIndirectLight(FilamentApp::get().getIBL()->getIndirectLight());
+        auto ibl = FilamentApp::get().getIBL();
+        if (ibl) {
+            app.viewer->setIndirectLight(ibl->getIndirectLight());
+        }
     };
 
     auto setup = [&](Engine* engine, View* view, Scene* scene) {

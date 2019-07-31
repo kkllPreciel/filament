@@ -119,8 +119,9 @@ LC_UNAME=`echo ${UNAME} | tr '[:upper:]' '[:lower:]'`
 function build_clean {
     echo "Cleaning build directories..."
     rm -Rf out
-    rm -Rf android/filament-android/build
-    rm -Rf android/filament-android/.externalNativeBuild
+    rm -Rf android/filament-android/build android/filament-android/.externalNativeBuild
+    rm -Rf android/filamat-android/build android/filamat-android/.externalNativeBuild
+    rm -Rf android/gltfio-android/build android/gltfio-android/.externalNativeBuild
 }
 
 function build_desktop_target {
@@ -142,7 +143,6 @@ function build_desktop_target {
             -DIMPORT_EXECUTABLES_DIR=out \
             -DCMAKE_BUILD_TYPE=$1 \
             -DCMAKE_INSTALL_PREFIX=../${lc_target}/filament \
-            -DFILAMENT_REQUIRES_CXXABI=${FILAMENT_REQUIRES_CXXABI} \
             -DENABLE_JAVA=${ENABLE_JAVA} \
             ../..
     fi
@@ -395,7 +395,8 @@ function build_android {
 
         if [[ "$INSTALL_COMMAND" ]]; then
             echo "Installing out/filamat-android-debug.aar..."
-            cp build/outputs/aar/filamat-android-debug.aar ../../out/
+            cp build/outputs/aar/filamat-android-full-debug.aar ../../out/
+            cp build/outputs/aar/filamat-android-lite-debug.aar ../../out/
         fi
     fi
 
@@ -404,7 +405,33 @@ function build_android {
 
         if [[ "$INSTALL_COMMAND" ]]; then
             echo "Installing out/filamat-android-release.aar..."
-            cp build/outputs/aar/filamat-android-release.aar ../../out/
+            cp build/outputs/aar/filamat-android-full-release.aar ../../out/
+            cp build/outputs/aar/filamat-android-lite-release.aar ../../out/
+        fi
+    fi
+
+    cd ../..
+
+
+    cd android/gltfio-android
+
+    if [[ "$ISSUE_DEBUG_BUILD" == "true" ]]; then
+        ./gradlew -Pfilament_dist_dir=../../out/android-debug/filament assembleDebug \
+                    -Pextra_cmake_args=${VULKAN_ANDROID_OPTION}
+
+        if [[ "$INSTALL_COMMAND" ]]; then
+            echo "Installing out/gltfio-android-debug.aar..."
+            cp build/outputs/aar/gltfio-android-debug.aar ../../out/
+        fi
+    fi
+
+    if [[ "$ISSUE_RELEASE_BUILD" == "true" ]]; then
+        ./gradlew -Pfilament_dist_dir=../../out/android-release/filament assembleRelease \
+                -Pextra_cmake_args=${VULKAN_ANDROID_OPTION}
+
+        if [[ "$INSTALL_COMMAND" ]]; then
+            echo "Installing out/gltfio-android-release.aar..."
+            cp build/outputs/aar/gltfio-android-release.aar ../../out/
         fi
     fi
 

@@ -42,7 +42,8 @@ struct alignas(4) MaterialKey {
     bool hasOcclusionTexture : 1;
     bool hasEmissiveTexture : 1;
     bool useSpecularGlossiness : 1;
-    AlphaMode alphaMode;
+    AlphaMode alphaMode : 4;
+    bool enableDiagnostics : 4;
     union {
         struct {
             bool hasMetallicRoughnessTexture : 1;
@@ -59,17 +60,22 @@ struct alignas(4) MaterialKey {
     uint8_t aoUV;
     uint8_t normalUV;
     bool hasTextureTransforms : 8;
-    // -- 32 bit boundary --
-    float alphaMaskThreshold;
 };
 
-static_assert(sizeof(MaterialKey) == 12, "MaterialKey has unexpected padding.");
+static_assert(sizeof(MaterialKey) == 8, "MaterialKey has unexpected padding.");
 
 bool operator==(const MaterialKey& k1, const MaterialKey& k2);
 
 // Define a mapping from a uv set index in the source asset to one of Filament's uv sets.
 enum UvSet : uint8_t { UNUSED, UV0, UV1 };
 using UvMap = std::array<UvSet, 8>;
+
+inline uint8_t getNumUvSets(const UvMap& uvmap) {
+    return std::max({
+        uvmap[0], uvmap[1], uvmap[2], uvmap[3],
+        uvmap[4], uvmap[5], uvmap[6], uvmap[7],
+    });
+};
 
 enum MaterialSource {
     GENERATE_SHADERS,

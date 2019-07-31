@@ -46,6 +46,11 @@ using namespace filament::math;
 using namespace utils;
 
 namespace gltfio {
+
+struct ResourceLoader::Impl {
+    tsl::robin_map<std::string, BufferDescriptor> mResourceCache;
+};
+
 namespace details {
 
 // The AssetPool tracks references to raw source data (cgltf hierarchies) and frees them
@@ -90,11 +95,12 @@ private:
 
 using namespace details;
 
-ResourceLoader::ResourceLoader(const ResourceConfiguration& config) : mConfig(config),
-        mPool(new AssetPool) {}
+ResourceLoader::ResourceLoader(const ResourceConfiguration& config) :
+        mPool(new AssetPool), mConfig(config), pImpl(new Impl) {}
 
 ResourceLoader::~ResourceLoader() {
     mPool->onLoaderDestroyed();
+    delete pImpl;
 }
 
 static void importSkinningData(Skin& dstSkin, const cgltf_skin& srcSkin) {
@@ -102,9 +108,14 @@ static void importSkinningData(Skin& dstSkin, const cgltf_skin& srcSkin) {
     dstSkin.inverseBindMatrices.resize(srcSkin.joints_count);
     if (srcMatrices) {
         auto dstMatrices = (uint8_t*) dstSkin.inverseBindMatrices.data();
-        auto srcBuffer = srcMatrices->buffer_view->buffer->data;
+        uint8_t* bytes = (uint8_t*) srcMatrices->buffer_view->buffer->data;
+        auto srcBuffer = (void*) (bytes + srcMatrices->offset + srcMatrices->buffer_view->offset);
         memcpy(dstMatrices, srcBuffer, srcSkin.joints_count * sizeof(mat4f));
     }
+}
+
+void ResourceLoader::addResourceData(std::string url, BufferDescriptor&& buffer) {
+    pImpl->mResourceCache.emplace(url, std::move(buffer));
 }
 
 static void convertBytesToShorts(uint16_t* dst, const uint8_t* src, size_t count) {
@@ -121,6 +132,10 @@ static void generateTrivialIndices(uint32_t* dst, size_t numVertices) {
 
 bool ResourceLoader::loadResources(FilamentAsset* asset) {
     FFilamentAsset* fasset = upcast(asset);
+    if (fasset->mResourcesLoaded) {
+        return false;
+    }
+    fasset->mResourcesLoaded = true;
     mPool->addAsset(fasset);
     auto gltf = (cgltf_data*) fasset->mSourceAsset;
     cgltf_options options {};
@@ -159,8 +174,8 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
                 return false;
             }
         } else if (strstr(uri, "://") == nullptr) {
-            auto iter = mResourceCache.find(uri);
-            if (iter == mResourceCache.end()) {
+            auto iter = pImpl->mResourceCache.find(uri);
+            if (iter == pImpl->mResourceCache.end()) {
                 slog.e << "Unable to load " << uri << io::endl;
                 return false;
             }
@@ -174,12 +189,19 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
     #else
 
     // Read data from the file system and base64 URLs.
-    cgltf_result result = cgltf_load_buffers(&options, gltf, mConfig.basePath.c_str());
+    cgltf_result result = cgltf_load_buffers(&options, gltf, mConfig.gltfPath.c_str());
     if (result != cgltf_result_success) {
         slog.e << "Unable to load resources." << io::endl;
         return false;
     }
 
+    #endif
+
+    #ifndef NDEBUG
+    if (cgltf_validate(gltf) != cgltf_result_success) {
+        slog.e << "Failed cgltf validation." << io::endl;
+        return false;
+    }
     #endif
 
     // To be robust against the glTF conformance suite, we optionally ensure that skinning weights
@@ -197,9 +219,12 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
 
     // Upload data to the GPU.
     const BufferBinding* bindings = asset->getBufferBindings();
+    bool needsTangents = false;
     for (size_t i = 0, n = asset->getBufferBindingCount(); i < n; ++i) {
         auto bb = bindings[i];
-        if (bb.vertexBuffer && !bb.generateDummyData) {
+        if (bb.vertexBuffer && bb.generateTangents) {
+            needsTangents = true;
+        } else if (bb.vertexBuffer && !bb.generateDummyData) {
             const uint8_t* data8 = bb.offset + (const uint8_t*) *bb.data;
             mPool->addPendingUpload();
             VertexBuffer::BufferDescriptor bd(data8, bb.size, AssetPool::onLoadedResource, mPool);
@@ -238,7 +263,9 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
     }
 
     // Compute surface orientation quaternions if necessary.
-    computeTangents(fasset);
+    if (needsTangents) {
+        computeTangents(fasset);
+    }
 
     // Finally, load image files and create Filament Textures.
     return createTextures(fasset);
@@ -306,8 +333,8 @@ bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
         }
 
         // Check the resource cache for this URL, otherwise load it from the file system.
-        auto iter = mResourceCache.find(tb.uri);
-        if (iter != mResourceCache.end()) {
+        auto iter = pImpl->mResourceCache.find(tb.uri);
+        if (iter != pImpl->mResourceCache.end()) {
             const uint8_t* data8 = (const uint8_t*) iter->second.buffer;
             texels = stbi_load_from_memory(data8, iter->second.size, &width, &height, &comp, 4);
         } else {
@@ -315,7 +342,7 @@ bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
                 slog.e << "Unable to load texture: " << tb.uri << io::endl;
                 return false;
             #else
-                utils::Path fullpath = this->mConfig.basePath + tb.uri;
+                utils::Path fullpath = this->mConfig.gltfPath.getParent() + tb.uri;
                 texels = stbi_load(fullpath.c_str(), &width, &height, &comp, 4);
             #endif
         }
@@ -339,23 +366,35 @@ void ResourceLoader::computeTangents(FFilamentAsset* asset) const {
     std::vector<float2> fp32TexCoords;
     std::vector<uint3> ui32Triangles;
 
-    auto computeQuats = [&](const cgltf_primitive& prim) {
+    constexpr int kMorphTargetUnused = -1;
+
+    auto computeQuats = [&](const cgltf_primitive& prim, VertexBuffer* vb, uint8_t slot,
+            int morphTargetIndex) {
 
         cgltf_size vertexCount = 0;
 
-        // Collect accessors for normals, tangents, etc.
+        // Build a mapping from cgltf_attribute_type to cgltf_accessor*.
         const int NUM_ATTRIBUTES = 8;
-        int slots[NUM_ATTRIBUTES] = {};
         const cgltf_accessor* accessors[NUM_ATTRIBUTES] = {};
-        for (cgltf_size slot = 0; slot < prim.attributes_count; slot++) {
-            const cgltf_attribute& attr = prim.attributes[slot];
-            // Ignore the second set of UV's.
-            if (attr.index != 0) {
-                continue;
+
+        // Collect accessors for normals, tangents, etc.
+        if (morphTargetIndex == kMorphTargetUnused) {
+            for (cgltf_size aindex = 0; aindex < prim.attributes_count; aindex++) {
+                const cgltf_attribute& attr = prim.attributes[aindex];
+                if (attr.index == 0) {
+                    accessors[attr.type] = attr.data;
+                    vertexCount = attr.data->count;
+                }
             }
-            vertexCount = attr.data->count;
-            slots[attr.type] = slot;
-            accessors[attr.type] = attr.data;
+        } else {
+            const cgltf_morph_target& morphTarget = prim.targets[morphTargetIndex];
+            for (cgltf_size aindex = 0; aindex < morphTarget.attributes_count; aindex++) {
+                const cgltf_attribute& attr = prim.attributes[aindex];
+                if (attr.index == 0) {
+                    accessors[attr.type] = attr.data;
+                    vertexCount = attr.data->count;
+                }
+            }
         }
 
         // At a minimum we need normals to generate tangents.
@@ -448,16 +487,42 @@ void ResourceLoader::computeTangents(FFilamentAsset* asset) const {
         // Upload quaternions to the GPU.
         auto callback = (VertexBuffer::BufferDescriptor::Callback) free;
         VertexBuffer::BufferDescriptor bd(quats, vertexCount * sizeof(short4), callback);
-        VertexBuffer* vb = asset->mPrimMap.at(&prim);
-        vb->setBufferAt(*mConfig.engine, slots[cgltf_attribute_type_normal], std::move(bd));
+        vb->setBufferAt(*mConfig.engine, slot, std::move(bd));
     };
 
+    // Collect all TANGENT vertex attribute slots that need to be populated.
+    tsl::robin_map<VertexBuffer*, uint8_t> baseTangents;
+    tsl::robin_map<VertexBuffer*, uint8_t> morphTangents[4];
+    const BufferBinding* bindings = asset->getBufferBindings();
+    for (size_t i = 0, n = asset->getBufferBindingCount(); i < n; ++i) {
+        auto bb = bindings[i];
+        if (bb.vertexBuffer && bb.generateTangents) {
+            if (bb.isMorphTarget) {
+                morphTangents[bb.morphTargetIndex][bb.vertexBuffer] = bb.bufferIndex;
+            } else {
+                baseTangents[bb.vertexBuffer] = bb.bufferIndex;
+            }
+        }
+    }
+
+    // Go through all cgltf primitives and populate their tangents if requested.
     for (auto iter : asset->mNodeMap) {
         const cgltf_mesh* mesh = iter.first->mesh;
         if (mesh) {
             cgltf_size nprims = mesh->primitives_count;
             for (cgltf_size index = 0; index < nprims; ++index) {
-                computeQuats(mesh->primitives[index]);
+                VertexBuffer* vb = asset->mPrimMap.at(mesh->primitives + index);
+                auto iter = baseTangents.find(vb);
+                if (iter != baseTangents.end()) {
+                    computeQuats(mesh->primitives[index], vb, iter->second, kMorphTargetUnused);
+                }
+                for (int morphTarget = 0; morphTarget < 4; morphTarget++) {
+                    const auto& tangents = morphTangents[morphTarget];
+                    auto iter = tangents.find(vb);
+                    if (iter != tangents.end()) {
+                        computeQuats(mesh->primitives[index], vb, iter->second, morphTarget);
+                    }
+                }
             }
         }
     }
@@ -498,6 +563,16 @@ void ResourceLoader::normalizeSkinningWeights(details::FFilamentAsset* asset) co
 void ResourceLoader::updateBoundingBoxes(details::FFilamentAsset* asset) const {
     auto& rm = mConfig.engine->getRenderableManager();
     auto& tm = mConfig.engine->getTransformManager();
+
+    // The purpose of the root node is to give the client a place for custom transforms.
+    // Since it is not part of the source model, it should be ignored when computing the
+    // bounding box.
+    TransformManager::Instance root = tm.getInstance(asset->getRoot());
+    std::vector<Entity> modelRoots(tm.getChildCount(root));
+    tm.getChildren(root, modelRoots.data(), modelRoots.size());
+    for (auto e : modelRoots) {
+        tm.setParent(tm.getInstance(e), 0);
+    }
 
     auto computeBoundingBox = [&](const cgltf_primitive& prim) {
         Aabb aabb;
@@ -550,6 +625,11 @@ void ResourceLoader::updateBoundingBoxes(details::FFilamentAsset* asset) const {
             assetBounds.max = max(assetBounds.max, maxpt);
         }
     }
+
+    for (auto e : modelRoots) {
+        tm.setParent(tm.getInstance(e), root);
+    }
+
     asset->mBoundingBox = assetBounds;
 }
 

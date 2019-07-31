@@ -74,14 +74,16 @@ public:
     FEngine& getEngine() const noexcept  { return mEngine; }
 
     backend::Handle<backend::HwProgram> getProgramSlow(uint8_t variantKey) const noexcept;
+    backend::Handle<backend::HwProgram> getSurfaceProgramSlow(uint8_t variantKey) const noexcept;
+    backend::Handle<backend::HwProgram> getPostProcessProgramSlow(uint8_t variantKey) const noexcept;
     backend::Handle<backend::HwProgram> getProgram(uint8_t variantKey) const noexcept {
-
-        // filterVariant() has already been applied in generateCommands(), shouldn't be needed here
-        assert( variantKey == Variant::filterVariant(variantKey, isVariantLit()) );
-
         backend::Handle<backend::HwProgram> const entry = mCachedPrograms[variantKey];
         return UTILS_LIKELY(entry) ? entry : getProgramSlow(variantKey);
     }
+    backend::Program getProgramBuilderWithVariants(uint8_t variantKey, uint8_t vertexVariantKey,
+            uint8_t fragmentVariantKey) const noexcept;
+    backend::Handle<backend::HwProgram> createAndCacheProgram(backend::Program&& p,
+            uint8_t variantKey) const noexcept;
 
     bool isVariantLit() const noexcept { return mIsVariantLit; }
 
@@ -94,6 +96,7 @@ public:
     BlendingMode getBlendingMode() const noexcept { return mBlendingMode; }
     BlendingMode getRenderBlendingMode() const noexcept { return mRenderBlendingMode; }
     VertexDomain getVertexDomain() const noexcept { return mVertexDomain; }
+    MaterialDomain getMaterialDomain() const noexcept { return mMaterialDomain; }
     CullingMode getCullingMode() const noexcept { return mCullingMode; }
     TransparencyMode getTransparencyMode() const noexcept { return mTransparencyMode; }
     bool isColorWriteEnabled() const noexcept { return mRasterState.colorWrite; }
@@ -106,6 +109,10 @@ public:
     float getMaskThreshold() const noexcept { return mMaskThreshold; }
     bool hasShadowMultiplier() const noexcept { return mHasShadowMultiplier; }
     AttributeBitset getRequiredAttributes() const noexcept { return mRequiredAttributes; }
+
+    bool hasSpecularAntiAliasing() const noexcept { return mSpecularAntiAliasing; }
+    float getSpecularAntiAliasingVariance() const noexcept { return mSpecularAntiAliasingVariance; }
+    float getSpecularAntiAliasingThreshold() const noexcept { return mSpecularAntiAliasingThreshold; }
 
     size_t getParameterCount() const noexcept {
         return mUniformInterfaceBlock.getUniformInfoList().size() +
@@ -128,14 +135,20 @@ private:
     BlendingMode mBlendingMode;
     Interpolation mInterpolation;
     VertexDomain mVertexDomain;
+    MaterialDomain mMaterialDomain;
     CullingMode mCullingMode;
     AttributeBitset mRequiredAttributes;
-    float mMaskThreshold;
+
+    float mMaskThreshold = 0.4f;
+    float mSpecularAntiAliasingVariance;
+    float mSpecularAntiAliasingThreshold;
+
     bool mDoubleSided;
     bool mDoubleSidedCapability = false;
     bool mHasShadowMultiplier = false;
     bool mHasCustomDepthShader = false;
     bool mIsDefaultMaterial = false;
+    bool mSpecularAntiAliasing = false;
 
     FMaterialInstance mDefaultInstance;
     SamplerInterfaceBlock mSamplerInterfaceBlock;

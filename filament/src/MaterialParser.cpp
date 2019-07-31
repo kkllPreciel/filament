@@ -212,6 +212,12 @@ bool MaterialParser::getVertexDomain(VertexDomain* value) const noexcept {
     return mImpl.getFromSimpleChunk(ChunkType::MaterialVertexDomain, reinterpret_cast<uint8_t*>(value));
 }
 
+bool MaterialParser::getMaterialDomain(MaterialDomain* value) const noexcept {
+    static_assert(sizeof(MaterialDomain) == sizeof(uint8_t),
+            "MaterialDomain expected size is wrong");
+    return mImpl.getFromSimpleChunk(ChunkType::MaterialDomain, reinterpret_cast<uint8_t*>(value));
+}
+
 bool MaterialParser::getBlendingMode(BlendingMode* value) const noexcept {
     static_assert(sizeof(BlendingMode) == sizeof(uint8_t),
             "BlendingMode expected size is wrong");
@@ -234,6 +240,18 @@ bool MaterialParser::getShading(Shading* value) const noexcept {
 
 bool MaterialParser::hasCustomDepthShader(bool* value) const noexcept {
     return mImpl.getFromSimpleChunk(ChunkType::MaterialHasCustomDepthShader, value);
+}
+
+bool MaterialParser::hasSpecularAntiAliasing(bool* value) const noexcept {
+    return mImpl.getFromSimpleChunk(ChunkType::MaterialSpecularAntiAliasing, value);
+}
+
+bool MaterialParser::getSpecularAntiAliasingVariance(float* value) const noexcept {
+    return mImpl.getFromSimpleChunk(ChunkType::MaterialSpecularAntiAliasingVariance, value);
+}
+
+bool MaterialParser::getSpecularAntiAliasingThreshold(float* value) const noexcept {
+    return mImpl.getFromSimpleChunk(ChunkType::MaterialSpecularAntiAliasingThreshold, value);
 }
 
 bool MaterialParser::getRequiredAttributes(AttributeBitset* value) const noexcept {

@@ -137,6 +137,9 @@ public:
     //! Returns the vertex domain of this material.
     VertexDomain getVertexDomain() const noexcept;
 
+    //! Returns the material domain of this material.
+    MaterialDomain getMaterialDomain() const noexcept;
+
     //! Returns the culling mode of this material.
     CullingMode getCullingMode() const noexcept;
 
@@ -162,6 +165,15 @@ public:
     //! Indicates whether this material uses the shadowing factor as a color multiplier.
     //! This values only makes sense when the shading mode is unlit.
     bool hasShadowMultiplier() const noexcept;
+
+    //! Indicates whether this material has specular anti-aliasing enabled
+    bool hasSpecularAntiAliasing() const noexcept;
+
+    //! Returns the screen-space variance for specular-antialiasing, this value is between 0 and 1.
+    float getSpecularAntiAliasingVariance() const noexcept;
+
+    //! Returns the clamping threshold for specular-antialiasing, this value is between 0 and 1.
+    float getSpecularAntiAliasingThreshold() const noexcept;
 
     //! Returns the list of vertex attributes required by this material.
     AttributeBitset getRequiredAttributes() const noexcept;

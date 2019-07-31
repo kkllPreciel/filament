@@ -84,7 +84,7 @@ struct FFilamentAsset : public FilamentAsset {
     }
 
     const utils::Entity* getEntities() const noexcept {
-        return mEntities.data();
+        return mEntities.empty() ? nullptr : mEntities.data();
     }
 
     utils::Entity getRoot() const noexcept {
@@ -96,6 +96,10 @@ struct FFilamentAsset : public FilamentAsset {
     }
 
     const filament::MaterialInstance* const* getMaterialInstances() const noexcept {
+        return mMaterialInstances.data();
+    }
+
+    filament::MaterialInstance* const* getMaterialInstances() noexcept {
         return mMaterialInstances.data();
     }
 
@@ -147,6 +151,10 @@ struct FFilamentAsset : public FilamentAsset {
         releaseSourceAsset();
     }
 
+    const void* getSourceAsset() noexcept {
+        return mSourceAsset;
+    }
+
     void acquireSourceAsset() {
         ++mSourceAssetRefCount;
     }
@@ -155,7 +163,9 @@ struct FFilamentAsset : public FilamentAsset {
         if (--mSourceAssetRefCount == 0) {
             mGlbData.clear();
             mGlbData.shrink_to_fit();
-            cgltf_free((cgltf_data*) mSourceAsset);
+            if (!mSharedSourceAsset) {
+                cgltf_free((cgltf_data*) mSourceAsset);
+            }
             mSourceAsset = nullptr;
         }
     }
@@ -173,6 +183,7 @@ struct FFilamentAsset : public FilamentAsset {
     Animator* mAnimator = nullptr;
     Wireframe* mWireframe = nullptr;
     int mSourceAssetRefCount = 0;
+    bool mResourcesLoaded = false;
 
     /** @{
      * Transient source data that can freed via releaseSourceData(). */
@@ -181,6 +192,7 @@ struct FFilamentAsset : public FilamentAsset {
     const cgltf_data* mSourceAsset = nullptr;
     tsl::robin_map<const cgltf_node*, utils::Entity> mNodeMap;
     tsl::robin_map<const cgltf_primitive*, filament::VertexBuffer*> mPrimMap;
+    bool mSharedSourceAsset = false;
     /** @} */
 };
 

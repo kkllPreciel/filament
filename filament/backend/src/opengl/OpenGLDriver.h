@@ -63,7 +63,7 @@ public:
     struct GLVertexBuffer : public backend::HwVertexBuffer {
         using HwVertexBuffer::HwVertexBuffer;
         struct {
-            std::array<GLuint, backend::MAX_ATTRIBUTE_BUFFER_COUNT> buffers;  // 4*6 bytes
+            std::array<GLuint, backend::MAX_VERTEX_ATTRIBUTE_COUNT> buffers;  // 4 * MAX_VERTEX_ATTRIBUTE_COUNT bytes
         } gl;
     };
 
@@ -103,7 +103,8 @@ public:
     struct GLTexture : public backend::HwTexture {
         using HwTexture::HwTexture;
         struct {
-            GLuint texture_id;
+            GLuint id;              // texture or renderbuffer id
+            mutable GLuint rb = 0;  // multi-sample sidecar renderbuffer
             GLenum target;
             GLenum internalFormat;
             mutable GLsync fence = nullptr;
@@ -112,21 +113,17 @@ public:
             GLfloat anisotropy = 1.0;
             int8_t baseLevel = 127;
             int8_t maxLevel = -1;
-            uint8_t targetIndex = 0;
+            uint8_t targetIndex = 0;    // optimization: index corresponding to target
         } gl;
+
+        void* platformPImpl = nullptr;
     };
 
     class DebugMarker {
         OpenGLDriver& driver;
     public:
-        inline DebugMarker(OpenGLDriver& driver, const char* string) noexcept : driver(driver) {
-            const char* const begin = string + sizeof("virtual void filament::OpenGLDriver::") - 1;
-            const char* const end = strchr(begin, '(');
-            driver.pushGroupMarker(begin, end - begin);
-        }
-        inline ~DebugMarker() noexcept {
-            driver.popGroupMarker();
-        }
+        DebugMarker(OpenGLDriver& driver, const char* string) noexcept;
+        ~DebugMarker() noexcept;
     };
 
     struct GLStream : public backend::HwStream {
@@ -171,18 +168,16 @@ public:
         struct GL {
             struct RenderBuffer {
                 GLTexture* texture = nullptr;
-                GLenum internalFormat = 0; // when texture == nullptr
-                GLuint rb = 0;             // when texture == nullptr
+                uint8_t level = 0; // level when attached to a texture
             };
             // field ordering to optimize size on 64-bits
             RenderBuffer color;
             RenderBuffer depth;
             RenderBuffer stencil;
             GLuint fbo = 0;
-            GLuint fbo_draw = 0;
-            backend::TargetBufferFlags resolve = backend::TargetBufferFlags::NONE; // attachments in fbo_draw to resolve
+            mutable GLuint fbo_read = 0;
+            mutable backend::TargetBufferFlags resolve = backend::TargetBufferFlags::NONE; // attachments in fbo_draw to resolve
             uint8_t samples : 4;
-            uint8_t colorLevel : 4; // Allows up to 15 levels (max texture size of 32768 x 32768)
         } gl;
     };
 
@@ -190,6 +185,8 @@ public:
 
     OpenGLDriver(OpenGLDriver const&) = delete;
     OpenGLDriver& operator=(OpenGLDriver const&) = delete;
+
+    constexpr static inline size_t getIndexForTextureTarget(GLuint target) noexcept;
 
 private:
     backend::ShaderModel getShaderModel() const noexcept final;
@@ -202,14 +199,14 @@ private:
     friend class backend::ConcreteDispatcher;
 
 #define DECL_DRIVER_API(methodName, paramsDecl, params) \
-    UTILS_ALWAYS_INLINE void methodName(paramsDecl);
+    UTILS_ALWAYS_INLINE inline void methodName(paramsDecl);
 
 #define DECL_DRIVER_API_SYNCHRONOUS(RetType, methodName, paramsDecl, params) \
     RetType methodName(paramsDecl) override;
 
 #define DECL_DRIVER_API_RETURN(RetType, methodName, paramsDecl, params) \
     RetType methodName##S() noexcept override; \
-    UTILS_ALWAYS_INLINE void methodName##R(RetType, paramsDecl);
+    UTILS_ALWAYS_INLINE inline void methodName##R(RetType, paramsDecl);
 
 #include "private/backend/DriverAPI.inc"
 
@@ -219,7 +216,7 @@ private:
     class HandleAllocator {
         utils::PoolAllocator< 16, 16>   mPool0;
         utils::PoolAllocator< 64, 32>   mPool1;
-        utils::PoolAllocator<128, 32>   mPool2;
+        utils::PoolAllocator<208, 32>   mPool2;
     public:
         static constexpr size_t MIN_ALIGNMENT_SHIFT = 4;
         explicit HandleAllocator(const utils::HeapArea& area);
@@ -267,6 +264,15 @@ private:
         return static_cast<Dp>(static_cast<void *>(base + offset));
     }
 
+    template<typename Dp, typename B>
+    inline
+    typename std::enable_if<
+            std::is_pointer<Dp>::value &&
+            std::is_base_of<B, typename std::remove_pointer<Dp>::type>::value, Dp>::type
+    handle_cast(backend::Handle<B> const& handle) noexcept {
+        return handle_cast<Dp>(const_cast<backend::Handle<B>&>(handle));
+    }
+
     typedef math::details::TVec4<GLint> vec4gli;
 
     friend class OpenGLProgram;
@@ -286,13 +292,11 @@ private:
 
     /* Misc... */
 
-    void framebufferTexture(backend::TargetBufferInfo& binfo, GLRenderTarget* rt, GLenum attachment) noexcept;
+    void framebufferTexture(backend::TargetBufferInfo const& binfo,
+            GLRenderTarget const* rt, GLenum attachment) noexcept;
 
-    void framebufferRenderbuffer(GLRenderTarget::GL::RenderBuffer* rb, GLenum attachment,
-            GLenum internalformat, uint32_t width, uint32_t height, uint8_t samples, GLuint fbo) noexcept;
-
-    GLuint framebufferRenderbuffer(uint32_t width, uint32_t height, uint8_t samples,
-            GLenum attachment, GLenum internalformat, GLuint fbo) noexcept;
+    void framebufferRenderbuffer(GLTexture const* t,
+            GLRenderTarget const* rt, GLenum attachment) noexcept;
 
     void setRasterStateSlow(backend::RasterState rs) noexcept;
     void setRasterState(backend::RasterState rs) noexcept {
@@ -322,14 +326,11 @@ private:
     /* State tracking GL wrappers... */
 
     constexpr inline size_t getIndexForCap(GLenum cap) noexcept;
-    constexpr inline size_t getIndexForBufferTarget(GLenum target) noexcept;
-    constexpr inline size_t getIndexForTextureTarget(GLuint target) noexcept;
+    constexpr static inline size_t getIndexForBufferTarget(GLenum target) noexcept;
 
     inline void pixelStore(GLenum, GLint) noexcept;
     inline void activeTexture(GLuint unit) noexcept;
-    inline void bindTexture(GLuint unit, GLuint target, GLTexture const* t) noexcept;
-    inline void bindTexture(GLuint unit, GLuint target, GLTexture const* t, size_t targetIndex) noexcept;
-    inline void UTILS_UNUSED bindTexture(GLuint unit, GLuint target, GLuint texId) noexcept;
+           void bindTexture(GLuint unit, GLTexture const* t) noexcept;
            void bindTexture(GLuint unit, GLuint target, GLuint texId, size_t targetIndex) noexcept;
 
     inline void unbindTexture(GLenum target, GLuint id) noexcept;
@@ -365,7 +366,9 @@ private:
     inline void setClearDepth(GLfloat depth) noexcept;
     inline void setClearStencil(GLint stencil) noexcept;
 
-    void resolve(GLRenderTarget const* rt, backend::TargetBufferFlags discardFlags) noexcept;
+    enum class ResolveAction { LOAD, STORE };
+    void resolvePass(ResolveAction action, GLRenderTarget const* rt,
+            backend::TargetBufferFlags discardFlags) noexcept;
 
     GLuint getSamplerSlow(backend::SamplerParams sp) const noexcept;
 
@@ -576,6 +579,7 @@ private:
     OpenGLBlitter* mOpenGLBlitter = nullptr;
     void updateStream(GLTexture* t, backend::DriverApi* driver) noexcept;
     void updateBuffer(GLenum target, GLBuffer* buffer, backend::BufferDescriptor const& p, uint32_t alignment = 16) noexcept;
+    void updateTextureLodRange(GLTexture* texture, int8_t targetLevel) noexcept;
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -608,9 +612,12 @@ constexpr size_t OpenGLDriver::getIndexForCap(GLenum cap) noexcept {
 #ifdef GL_ARB_seamless_cube_map
         case GL_TEXTURE_CUBE_MAP_SEAMLESS:      index = 11; break;
 #endif
-        default: index = 12; break; // should never happen
+#if GL41_HEADERS
+        case GL_PROGRAM_POINT_SIZE:             index = 12; break;
+#endif
+        default: index = 13; break; // should never happen
     }
-    assert(index < 12 && index < state.enables.caps.size());
+    assert(index < 13 && index < state.enables.caps.size());
     return index;
 }
 
@@ -638,19 +645,6 @@ void OpenGLDriver::activeTexture(GLuint unit) noexcept {
     update_state(state.textures.active, unit, [&]() {
         glActiveTexture(GL_TEXTURE0 + unit);
     });
-}
-
-void OpenGLDriver::bindTexture(GLuint unit, GLuint target, GLTexture const* t) noexcept {
-    bindTexture(unit, target, t, getIndexForTextureTarget(target));
-}
-
-void OpenGLDriver::bindTexture(GLuint unit, GLuint target, GLTexture const* t, size_t targetIndex) noexcept {
-    assert(t != nullptr);
-    bindTexture(unit, target, t->gl.texture_id, targetIndex);
-}
-
-void UTILS_UNUSED OpenGLDriver::bindTexture(GLuint unit, GLuint target, GLuint texId) noexcept {
-    bindTexture(unit, target, texId, getIndexForTextureTarget(target));
 }
 
 void OpenGLDriver::bindSampler(GLuint unit, GLuint sampler) noexcept {

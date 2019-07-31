@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 project(gltfio C ASM)
 
 set(TARGET gltfio)
@@ -11,6 +11,7 @@ set(PUBLIC_HDRS
         include/gltfio/Animator.h
         include/gltfio/AssetLoader.h
         include/gltfio/MaterialProvider.h
+        include/gltfio/AssetPipeline.h
         include/gltfio/ResourceLoader.h
         include/gltfio/SimpleViewer.h
         include/gltfio/FilamentAsset.h
@@ -41,17 +42,6 @@ if (CMAKE_CROSSCOMPILING)
     include(${IMPORT_EXECUTABLES})
 endif()
 
-if (ANDROID OR WEBGL OR IOS)
-    set(MATC_TARGET mobile)
-else()
-    set(MATC_TARGET desktop)
-endif()
-
-set(MATC_FLAGS -a all)
-if (NOT CMAKE_BUILD_TYPE MATCHES Release)
-    set(MATC_FLAGS -g ${MATC_FLAGS})
-endif()
-
 function(generate_mat SHADINGMODEL BLENDING)
     set(GENERATED_MAT "${RESOURCE_DIR}/${SHADINGMODEL}_${BLENDING}.mat")
     configure_file(materials/ubershader.mat.in ${GENERATED_MAT})
@@ -75,8 +65,7 @@ foreach (input_path ${MATERIAL_SRCS})
     set(output_path "${RESOURCE_DIR}/${basename}.filamat")
     add_custom_command(
             OUTPUT ${output_path}
-            COMMAND matc ${MATC_FLAGS} -p ${MATC_TARGET} -m material
-                    -o ${output_path} ${input_path}
+            COMMAND matc ${MATC_BASE_FLAGS} -m material -o ${output_path} ${input_path}
             MAIN_DEPENDENCY ${input_path}
             DEPENDS matc
             COMMENT "Compiling material ${mat_src} to ${output_path}"
@@ -106,22 +95,31 @@ add_custom_command(OUTPUT ${DUMMY_SRC} COMMAND echo "//" > ${DUMMY_SRC})
 add_library(gltfio_resources ${DUMMY_SRC} ${RESGEN_SOURCE})
 
 # ==================================================================================================
-# Build the "core" library (no filamat)
+# Build the "core" library (no filamat or pipeline)
 # ==================================================================================================
+
 include_directories(${PUBLIC_HDR_DIR} ${RESOURCE_DIR})
 link_libraries(math utils filament cgltf stb geometry gltfio_resources)
 
 add_library(gltfio_core STATIC ${PUBLIC_HDRS} ${SRCS})
 
 target_include_directories(gltfio_core PUBLIC ${PUBLIC_HDR_DIR})
+target_compile_options(gltfio_core PRIVATE $<$<PLATFORM_ID:Linux>:-fPIC>)
 
 if (NOT WEBGL AND NOT ANDROID AND NOT IOS)
 
     # ==================================================================================================
-    # Link the core library against filamat to create the "full" library
+    # Link the core library with additional dependencies to create the "full" library
     # ==================================================================================================
-    add_library(${TARGET} STATIC ${PUBLIC_HDRS} src/MaterialGenerator.cpp)
-    target_link_libraries(${TARGET} PUBLIC filamat gltfio_core)
+    add_library(${TARGET} STATIC ${PUBLIC_HDRS}
+        src/MaterialGenerator.cpp
+        src/AssetPipeline.cpp)
+    target_link_libraries(${TARGET} PUBLIC
+        filamat
+        xatlas
+        meshoptimizer
+        gltfio_core
+        rays)
     target_include_directories(${TARGET} PUBLIC ${PUBLIC_HDR_DIR})
 
     # ==================================================================================================
@@ -134,6 +132,7 @@ if (NOT WEBGL AND NOT ANDROID AND NOT IOS)
     else()
         target_compile_options(${TARGET} PRIVATE $<$<CONFIG:Release>:-ffast-math>)
     endif()
+    target_compile_options(${TARGET} PRIVATE $<$<PLATFORM_ID:Linux>:-fPIC>)
 
     # ==================================================================================================
     # Installation
@@ -143,7 +142,7 @@ if (NOT WEBGL AND NOT ANDROID AND NOT IOS)
 
 else()
 
-    install(TARGETS gltfio_core ARCHIVE DESTINATION lib/${DIST_DIR})
+    install(TARGETS gltfio_core gltfio_resources ARCHIVE DESTINATION lib/${DIST_DIR})
     install(DIRECTORY ${PUBLIC_HDR_DIR}/gltfio DESTINATION include)
 
 endif()

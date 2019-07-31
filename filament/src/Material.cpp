@@ -115,6 +115,25 @@ Material* Material::Builder::build(Engine& engine) {
 
 namespace details {
 
+static void addSamplerGroup(Program& pb, uint8_t bindingPoint, SamplerInterfaceBlock const& sib,
+        SamplerBindingMap const& map) {
+    const size_t samplerCount = sib.getSize();
+    if (samplerCount) {
+        std::vector<Program::Sampler> samplers(samplerCount);
+        auto const& list = sib.getSamplerInfoList();
+        for (size_t i = 0, c = samplerCount; i < c; ++i) {
+            CString uniformName(
+                    SamplerInterfaceBlock::getUniformName(sib.getName().c_str(),
+                            list[i].name.c_str()));
+            uint8_t binding;
+            UTILS_UNUSED bool ok = map.getSamplerBinding(bindingPoint, (uint8_t)i, &binding);
+            assert(ok);
+            samplers[i] = { std::move(uniformName), binding };
+        }
+        pb.setSamplerGroup(bindingPoint, samplers.data(), samplers.size());
+    }
+}
+
 FMaterial::FMaterial(FEngine& engine, const Material::Builder& builder)
         : mEngine(engine),
           mMaterialId(engine.getMaterialId())
@@ -138,6 +157,7 @@ FMaterial::FMaterial(FEngine& engine, const Material::Builder& builder)
     parser->getBlendingMode(&mBlendingMode);
     parser->getInterpolation(&mInterpolation);
     parser->getVertexDomain(&mVertexDomain);
+    parser->getMaterialDomain(&mMaterialDomain);
     parser->getRequiredAttributes(&mRequiredAttributes);
 
     if (mBlendingMode == BlendingMode::MASKED) {
@@ -185,6 +205,20 @@ FMaterial::FMaterial(FEngine& engine, const Material::Builder& builder)
             mRasterState.blendFunctionDstAlpha = BlendFunction::ONE;
             mRasterState.depthWrite = false;
             break;
+        case BlendingMode::MULTIPLY:
+            mRasterState.blendFunctionSrcRGB   = BlendFunction::ZERO;
+            mRasterState.blendFunctionSrcAlpha = BlendFunction::ZERO;
+            mRasterState.blendFunctionDstRGB   = BlendFunction::SRC_COLOR;
+            mRasterState.blendFunctionDstAlpha = BlendFunction::SRC_COLOR;
+            mRasterState.depthWrite = false;
+            break;
+        case BlendingMode::SCREEN:
+            mRasterState.blendFunctionSrcRGB   = BlendFunction::ONE;
+            mRasterState.blendFunctionSrcAlpha = BlendFunction::ONE;
+            mRasterState.blendFunctionDstRGB   = BlendFunction::ONE_MINUS_SRC_COLOR;
+            mRasterState.blendFunctionDstAlpha = BlendFunction::ONE_MINUS_SRC_COLOR;
+            mRasterState.depthWrite = false;
+            break;
     }
 
     bool depthWriteSet;
@@ -230,6 +264,12 @@ FMaterial::FMaterial(FEngine& engine, const Material::Builder& builder)
     mRasterState.depthFunc = depthTest ? DepthFunc::LE : DepthFunc::A;
     mRasterState.alphaToCoverage = mBlendingMode == BlendingMode::MASKED;
 
+    parser->hasSpecularAntiAliasing(&mSpecularAntiAliasing);
+    if (mSpecularAntiAliasing) {
+        parser->getSpecularAntiAliasingVariance(&mSpecularAntiAliasingVariance);
+        parser->getSpecularAntiAliasingThreshold(&mSpecularAntiAliasingThreshold);
+    }
+
     // we can only initialize the default instance once we're initialized ourselves
     mDefaultInstance.initDefaultInstance(engine, this);
 }
@@ -268,12 +308,62 @@ bool FMaterial::hasParameter(const char* name) const noexcept {
 }
 
 backend::Handle<backend::HwProgram> FMaterial::getProgramSlow(uint8_t variantKey) const noexcept {
-    const ShaderModel sm = mEngine.getDriver().getShaderModel();
+    switch (getMaterialDomain()) {
+        case MaterialDomain::SURFACE:
+            return getSurfaceProgramSlow(variantKey);
+
+        case MaterialDomain::POST_PROCESS:
+            return getPostProcessProgramSlow(variantKey);
+    }
+}
+
+backend::Handle<backend::HwProgram> FMaterial::getSurfaceProgramSlow(uint8_t variantKey)
+    const noexcept {
+    // filterVariant() has already been applied in generateCommands(), shouldn't be needed here
+    // if we're unlit, we don't have any bits that correspond to lit materials
+    assert( variantKey == Variant::filterVariant(variantKey, isVariantLit()) );
 
     assert(!Variant::isReserved(variantKey));
 
     uint8_t vertexVariantKey = Variant::filterVariantVertex(variantKey);
     uint8_t fragmentVariantKey = Variant::filterVariantFragment(variantKey);
+
+    Program pb = getProgramBuilderWithVariants(variantKey, vertexVariantKey, fragmentVariantKey);
+    pb
+        .setUniformBlock(BindingPoints::PER_VIEW, UibGenerator::getPerViewUib().getName())
+        .setUniformBlock(BindingPoints::LIGHTS, UibGenerator::getLightsUib().getName())
+        .setUniformBlock(BindingPoints::PER_RENDERABLE, UibGenerator::getPerRenderableUib().getName())
+        .setUniformBlock(BindingPoints::PER_MATERIAL_INSTANCE, mUniformInterfaceBlock.getName());
+
+    if (Variant(variantKey).hasSkinningOrMorphing()) {
+        pb.setUniformBlock(BindingPoints::PER_RENDERABLE_BONES,
+                UibGenerator::getPerRenderableBonesUib().getName());
+    }
+
+    addSamplerGroup(pb, BindingPoints::PER_VIEW, SibGenerator::getPerViewSib(), mSamplerBindings);
+    addSamplerGroup(pb, BindingPoints::PER_MATERIAL_INSTANCE, mSamplerInterfaceBlock, mSamplerBindings);
+
+    return createAndCacheProgram(std::move(pb), variantKey);
+}
+
+backend::Handle<backend::HwProgram> FMaterial::getPostProcessProgramSlow(uint8_t variantKey)
+    const noexcept {
+
+    Program pb = getProgramBuilderWithVariants(variantKey, variantKey, variantKey);
+    pb
+            .setUniformBlock(BindingPoints::PER_VIEW, UibGenerator::getPerViewUib().getName())
+            .setUniformBlock(BindingPoints::PER_MATERIAL_INSTANCE, mUniformInterfaceBlock.getName());
+
+    addSamplerGroup(pb, BindingPoints::PER_MATERIAL_INSTANCE, mSamplerInterfaceBlock, mSamplerBindings);
+
+    return createAndCacheProgram(std::move(pb), variantKey);
+}
+
+Program FMaterial::getProgramBuilderWithVariants(
+        uint8_t variantKey,
+        uint8_t vertexVariantKey,
+        uint8_t fragmentVariantKey) const noexcept {
+    const ShaderModel sm = mEngine.getDriver().getShaderModel();
 
     /*
      * Vertex shader
@@ -306,39 +396,13 @@ backend::Handle<backend::HwProgram> FMaterial::getProgramSlow(uint8_t variantKey
     Program pb;
     pb      .diagnostics(mName, variantKey)
             .withVertexShader(vsBuilder.data(), vsBuilder.size())
-            .withFragmentShader(fsBuilder.data(), fsBuilder.size())
-            .setUniformBlock(BindingPoints::PER_VIEW, UibGenerator::getPerViewUib().getName())
-            .setUniformBlock(BindingPoints::LIGHTS, UibGenerator::getLightsUib().getName())
-            .setUniformBlock(BindingPoints::PER_RENDERABLE, UibGenerator::getPerRenderableUib().getName())
-            .setUniformBlock(BindingPoints::PER_MATERIAL_INSTANCE, mUniformInterfaceBlock.getName());
+            .withFragmentShader(fsBuilder.data(), fsBuilder.size());
+    return pb;
+}
 
-    if (Variant(variantKey).hasSkinning()) {
-        pb.setUniformBlock(BindingPoints::PER_RENDERABLE_BONES,
-                UibGenerator::getPerRenderableBonesUib().getName());
-    }
-
-    auto addSamplerGroup = [&pb]
-            (uint8_t bindingPoint, SamplerInterfaceBlock const& sib, SamplerBindingMap const& map) {
-        const size_t samplerCount = sib.getSize();
-        if (samplerCount) {
-            std::vector<Program::Sampler> samplers(samplerCount);
-            auto const& list = sib.getSamplerInfoList();
-            for (size_t i = 0, c = samplerCount; i < c; ++i) {
-                CString uniformName(
-                        SamplerInterfaceBlock::getUniformName(sib.getName().c_str(),
-                                list[i].name.c_str()));
-                uint8_t binding;
-                map.getSamplerBinding(bindingPoint, (uint8_t)i, &binding);
-                samplers[i] = { std::move(uniformName), binding };
-            }
-            pb.setSamplerGroup(bindingPoint, samplers.data(), samplers.size());
-        }
-    };
-
-    addSamplerGroup(BindingPoints::PER_VIEW, SibGenerator::getPerViewSib(), mSamplerBindings);
-    addSamplerGroup(BindingPoints::PER_MATERIAL_INSTANCE, mSamplerInterfaceBlock, mSamplerBindings);
-
-    auto program = mEngine.getDriverApi().createProgram(std::move(pb));
+backend::Handle<backend::HwProgram> FMaterial::createAndCacheProgram(Program&& p,
+        uint8_t variantKey) const noexcept {
+    auto program = mEngine.getDriverApi().createProgram(std::move(p));
     assert(program);
 
     mCachedPrograms[variantKey] = program;
@@ -407,6 +471,10 @@ VertexDomain Material::getVertexDomain() const noexcept {
     return upcast(this)->getVertexDomain();
 }
 
+MaterialDomain Material::getMaterialDomain() const noexcept {
+    return upcast(this)->getMaterialDomain();
+}
+
 CullingMode Material::getCullingMode() const noexcept {
     return upcast(this)->getCullingMode();
 }
@@ -437,6 +505,18 @@ float Material::getMaskThreshold() const noexcept {
 
 bool Material::hasShadowMultiplier() const noexcept {
     return upcast(this)->hasShadowMultiplier();
+}
+
+bool Material::hasSpecularAntiAliasing() const noexcept {
+    return upcast(this)->hasSpecularAntiAliasing();
+}
+
+float Material::getSpecularAntiAliasingVariance() const noexcept {
+    return upcast(this)->getSpecularAntiAliasingVariance();
+}
+
+float Material::getSpecularAntiAliasingThreshold() const noexcept {
+    return upcast(this)->getSpecularAntiAliasingThreshold();
 }
 
 size_t Material::getParameterCount() const noexcept {
