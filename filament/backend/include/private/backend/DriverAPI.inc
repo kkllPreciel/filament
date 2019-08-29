@@ -311,6 +311,8 @@ DECL_DRIVER_API_SYNCHRONOUS_2(backend::FenceStatus, wait, backend::FenceHandle, 
 
 DECL_DRIVER_API_SYNCHRONOUS_1(bool, isTextureFormatSupported, backend::TextureFormat, format)
 
+DECL_DRIVER_API_SYNCHRONOUS_1(bool, isTextureFormatMipmappable, backend::TextureFormat, format)
+
 DECL_DRIVER_API_SYNCHRONOUS_1(bool, isRenderTargetFormatSupported, backend::TextureFormat, format)
 
 DECL_DRIVER_API_SYNCHRONOUS_0(bool, isFrameTimeSupported)
@@ -446,6 +448,10 @@ DECL_DRIVER_API_2(pushGroupMarker,
         size_t, len = 0)
 
 DECL_DRIVER_API_0(popGroupMarker)
+
+DECL_DRIVER_API_0(startCapture)
+
+DECL_DRIVER_API_0(stopCapture)
 
 
 /*
